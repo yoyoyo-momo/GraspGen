@@ -18,7 +18,12 @@ import torch.nn as nn
 from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
 from scipy.spatial import KDTree
 
-from grasp_gen.utils.math_utils import matrix_to_rt, rt_to_matrix
+from grasp_gen.utils.math_utils import (
+    matrix_to_rt,
+    rt_to_matrix,
+    grasp_state_to_components,
+    components_to_grasp_state,
+)
 from grasp_gen.metrics import compute_metrics_given_two_sets_of_poses, compute_recall
 from grasp_gen.models.model_utils import (
     PointNetPlusPlus,
@@ -63,6 +68,7 @@ class GraspGenGenerator(nn.Module):
         pose_repr (str): Type of pose representation. Default: 'mlp'
         num_grasps_per_object (int): Number of grasps to generate per object. Default: 20
         checkpoint_object_encoder_pretrained (str): Path to pretrained object encoder. Default: None
+        num_joints (int): Number of finger joints per grasp state (q_pre + q_final = 2*num_joints). Default: 8
     """
 
     def __init__(
@@ -88,6 +94,7 @@ class GraspGenGenerator(nn.Module):
         pose_repr: str = "mlp",
         num_grasps_per_object: int = 20,
         checkpoint_object_encoder_pretrained: str = None,
+        num_joints: int = 8,
     ):
         super().__init__()
 
@@ -112,15 +119,18 @@ class GraspGenGenerator(nn.Module):
         self.pose_repr = pose_repr
         self.num_grasps_per_object = num_grasps_per_object
         self.checkpoint_object_encoder_pretrained = checkpoint_object_encoder_pretrained
+        self.num_joints = num_joints
 
         if self.grasp_repr == "r3_6d":
-            self.output_dim = 9
+            self.pose_dim = 9
         elif self.grasp_repr in ["r3_so3", "r3_euler"]:
-            self.output_dim = 6
+            self.pose_dim = 6
         else:
             raise NotImplementedError(
                 f"Rotation representation {grasp_repr} is not implemented!"
             )
+        # Full TriFinger grasp state: [xyz(3) + rot6d/so3/euler + q_pre(num_joints) + q_final(num_joints)]
+        self.output_dim = self.pose_dim + 2 * self.num_joints
 
         if obs_backbone == "vit":
             from grasp_gen.models.vit import VisionTransformer
@@ -234,6 +244,7 @@ class GraspGenGenerator(nn.Module):
             "pose_repr": cfg.pose_repr,
             "num_grasps_per_object": cfg.num_grasps_per_object,
             "checkpoint_object_encoder_pretrained": cfg.checkpoint_object_encoder_pretrained,
+            "num_joints": getattr(cfg, "num_joints", 8),
         }
         return cls(**args)
 
@@ -297,7 +308,17 @@ class GraspGenGenerator(nn.Module):
         if self.obs_backbone == "ptv3":
             depth = convert_to_ptv3_pc_format(depth, grid_size=self.grid_size)
 
-        grasps_gt = matrix_to_rt(grasps, self.grasp_repr, kappa=self.kappa)
+        # Build 25D TriFinger grasp state: [pose_9d | q_pre | q_final]
+        pose_9d = matrix_to_rt(grasps, self.grasp_repr, kappa=self.kappa)
+
+        if "q_pre" in data:
+            q_pre = data["q_pre"].reshape([-1, self.num_joints]).to(device)
+            q_final = data["q_final"].reshape([-1, self.num_joints]).to(device)
+        else:
+            q_pre = torch.zeros([batch_size, self.num_joints], device=device)
+            q_final = torch.zeros([batch_size, self.num_joints], device=device)
+
+        grasps_gt = components_to_grasp_state(pose_9d, q_pre, q_final)
 
         noise = torch.randn([batch_size, self.output_dim], device=device).float()
 
@@ -352,9 +373,10 @@ class GraspGenGenerator(nn.Module):
             noisy_grasps_pos = self.noise_scheduler_pos.add_noise(
                 grasps_gt[..., :3], noise[..., :3], timesteps
             )
+            # rot scheduler covers rotation + joint dims (everything after xyz)
             noisy_grasps_rot = self.noise_scheduler_rot.add_noise(
-                grasps_gt[..., 3 : self.output_dim],
-                noise[..., 3 : self.output_dim],
+                grasps_gt[..., 3:],
+                noise[..., 3:],
                 timesteps,
             )
             noisy_grasps = torch.hstack([noisy_grasps_pos, noisy_grasps_rot])
@@ -364,10 +386,10 @@ class GraspGenGenerator(nn.Module):
         samples = noisy_grasps if self.pose_repr == "mlp" else None
         noise_pred = self.diffusion_head(object_embedding, timesteps, samples)
 
-        pred_noise_pts_mat = rt_to_matrix(noise_pred, self.grasp_repr, self.kappa)
-        actual_noise_pts_mat = rt_to_matrix(noise, self.grasp_repr, self.kappa)
-        noisy_grasps_mat = rt_to_matrix(noisy_grasps, self.grasp_repr, self.kappa)
-        grasps_gt_mat = rt_to_matrix(grasps_gt, self.grasp_repr, self.kappa)
+        pred_noise_pts_mat = rt_to_matrix(noise_pred[:, :self.pose_dim], self.grasp_repr, self.kappa)
+        actual_noise_pts_mat = rt_to_matrix(noise[:, :self.pose_dim], self.grasp_repr, self.kappa)
+        noisy_grasps_mat = rt_to_matrix(noisy_grasps[:, :self.pose_dim], self.grasp_repr, self.kappa)
+        grasps_gt_mat = rt_to_matrix(grasps_gt[:, :self.pose_dim], self.grasp_repr, self.kappa)
 
         stats = compute_metrics_given_two_sets_of_poses(
             actual_noise_pts_mat, pred_noise_pts_mat, self.gripper_info
@@ -389,18 +411,31 @@ class GraspGenGenerator(nn.Module):
 
         if self.loss_l1_rot:
             rotation_loss = torch.linalg.norm(
-                noise[..., 3 : self.output_dim] - noise_pred[..., 3 : self.output_dim],
+                noise[..., 3 : self.pose_dim] - noise_pred[..., 3 : self.pose_dim],
                 dim=-1,
             )
             rotation_loss = torch.mean(rotation_loss)
             losses["rotation_loss"] = (1.0, rotation_loss)
 
+            # Joint losses (q_pre and q_final in the diffusion noise space)
+            joint_loss = torch.linalg.norm(
+                noise[..., self.pose_dim :] - noise_pred[..., self.pose_dim :],
+                dim=-1,
+            )
+            joint_loss = torch.mean(joint_loss)
+            losses["joint_loss"] = (1.0, joint_loss)
+
+        grasp_state_init_size = [num_objects_in_batch, num_grasps_per_batch, self.output_dim]
         outputs = {}
         outputs["actual_noise_pts_mat"] = actual_noise_pts_mat.reshape(grasps_init_size)
         outputs["pred_noise_pts_mat"] = pred_noise_pts_mat.reshape(grasps_init_size)
 
         outputs["noisy_grasps_mat"] = noisy_grasps_mat.reshape(grasps_init_size)
         outputs["grasps_gt_mat"] = grasps_gt_mat.reshape(grasps_init_size)
+
+        # Full 25D state outputs
+        outputs["grasp_state_gt"] = grasps_gt.reshape(grasp_state_init_size)
+        outputs["grasp_state_noisy"] = noisy_grasps.reshape(grasp_state_init_size)
 
         return outputs, losses, stats
 
@@ -435,13 +470,15 @@ class GraspGenGenerator(nn.Module):
         depth = depth.to(device)
 
         grasps_init_size = [num_objects_in_batch, num_grasps_per_batch, 4, 4]
+        grasp_state_init_size = [num_objects_in_batch, num_grasps_per_batch, self.output_dim]
 
         if self.kappa is not None:
             depth = self.kappa * depth
 
         if self.obs_backbone == "ptv3":
             depth = convert_to_ptv3_pc_format(depth, grid_size=self.grid_size)
-        # num_grasps_per_batch = data['grasps'].shape[1]
+
+        # Store per-iteration pose (4x4) for visualisation; joints stored separately
         grasps_per_iteration = torch.zeros(
             [
                 num_objects_in_batch,
@@ -483,14 +520,14 @@ class GraspGenGenerator(nn.Module):
                 self.noise_scheduler.set_timesteps(self.num_diffusion_iters_eval)
                 timesteps = self.noise_scheduler.timesteps
 
-            for k in timesteps:
+            for iter_idx, k in enumerate(timesteps):
                 samples = noisy_grasps if self.pose_repr == "mlp" else None
 
                 if self.pose_repr in ["grasp_cloud", "grasp_cloud_pe", "pc_feature"]:
                     ctrl_pts = self.ctr_pts.to(device=device)
 
                     noisy_grasps_mat = rt_to_matrix(
-                        noisy_grasps, self.grasp_repr, self.kappa
+                        noisy_grasps[:, :self.pose_dim], self.grasp_repr, self.kappa
                     )
                     grasp_pc = (noisy_grasps_mat @ ctrl_pts).transpose(-2, -1)[..., :3]
 
@@ -524,41 +561,37 @@ class GraspGenGenerator(nn.Module):
                 noise_pred = self.diffusion_head(object_embedding, k, samples)
 
                 if self.compositional_schedular:
-                    # Handle compositional case
+                    # pos scheduler: xyz dims; rot scheduler: rotation + joint dims
                     res_pos = self.noise_scheduler_pos.step(
                         model_output=noise_pred[..., :3],
                         timestep=k,
                         sample=noisy_grasps[..., :3],
                     )
                     res_rot = self.noise_scheduler_rot.step(
-                        model_output=noise_pred[..., 3 : self.output_dim],
+                        model_output=noise_pred[..., 3:],
                         timestep=k,
-                        sample=noisy_grasps[..., 3 : self.output_dim],
+                        sample=noisy_grasps[..., 3:],
                     )
 
                     # Compute likelihood contributions
                     if k > 0:  # Skip first step
-                        alpha_pos = self.noise_scheduler_pos.alphas[k]
                         beta_pos = self.noise_scheduler_pos.betas[k]
-                        var_pos = beta_pos
                         likelihood_pos = (
                             torch.distributions.Normal(
                                 res_pos.pred_original_sample,
-                                torch.sqrt(torch.tensor(var_pos, device=device)),
+                                torch.sqrt(torch.tensor(beta_pos, device=device)),
                             )
                             .log_prob(noisy_grasps[..., :3])
                             .sum(-1, keepdim=True)
                         )
 
-                        alpha_rot = self.noise_scheduler_rot.alphas[k]
                         beta_rot = self.noise_scheduler_rot.betas[k]
-                        var_rot = beta_rot
                         likelihood_rot = (
                             torch.distributions.Normal(
                                 res_rot.pred_original_sample,
-                                torch.sqrt(torch.tensor(var_rot, device=device)),
+                                torch.sqrt(torch.tensor(beta_rot, device=device)),
                             )
-                            .log_prob(noisy_grasps[..., 3 : self.output_dim])
+                            .log_prob(noisy_grasps[..., 3:])
                             .sum(-1, keepdim=True)
                         )
 
@@ -589,14 +622,26 @@ class GraspGenGenerator(nn.Module):
 
                     noisy_grasps = res.prev_sample
 
-                pred_grasps = rt_to_matrix(noisy_grasps, self.grasp_repr, self.kappa)
+                pred_grasps = rt_to_matrix(noisy_grasps[:, :self.pose_dim], self.grasp_repr, self.kappa)
 
                 grasps_pred = pred_grasps.reshape(grasps_init_size)
 
-                grasps_per_iteration[:, k, :, ::] = grasps_pred
+                grasps_per_iteration[:, iter_idx, :, ::] = grasps_pred
 
-        grasps_pred = pred_grasps.reshape(grasps_init_size)
-        grasps_pred[:, :, 3, 3] = 1  # To make proper homogeneous matrix
+        # Final pose matrix
+        T_palm = rt_to_matrix(noisy_grasps[:, :self.pose_dim], self.grasp_repr, self.kappa)
+        T_palm = T_palm.reshape(grasps_init_size)
+        T_palm[:, :, 3, 3] = 1  # proper homogeneous matrix
+
+        # Split joint dims from the final denoised state
+        q_pre_out = noisy_grasps[:, self.pose_dim : self.pose_dim + self.num_joints]
+        q_final_out = noisy_grasps[:, self.pose_dim + self.num_joints : self.output_dim]
+        q_pre_out = q_pre_out.reshape([num_objects_in_batch, num_grasps_per_batch, self.num_joints])
+        q_final_out = q_final_out.reshape([num_objects_in_batch, num_grasps_per_batch, self.num_joints])
+
+        grasp_state_out = noisy_grasps.reshape([num_objects_in_batch, num_grasps_per_batch, self.output_dim])
+
+        grasps_pred = T_palm
 
         stats_batch = []
 
@@ -641,6 +686,12 @@ class GraspGenGenerator(nn.Module):
                 )
 
         outputs = {
+            # TriFinger action state components
+            "T_palm": T_palm,
+            "q_pre": q_pre_out,
+            "q_final": q_final_out,
+            "grasp_state": grasp_state_out,
+            # Legacy key kept for downstream inference scripts that expect grasps_pred as 4x4
             "grasps_pred": grasps_pred,
             "grasps_per_iteration": grasps_per_iteration,
             "grasp_confidence": torch.zeros(grasps_pred.shape[0]),

@@ -271,6 +271,45 @@ def compute_pose_distance_batch(
     return pos_dist + rot_dist
 
 
+def grasp_state_to_components(
+    grasp_state: torch.Tensor,
+) -> tuple:
+    """Split 25D TriFinger grasp state into palm pose and joint angles.
+
+    Layout: [x, y, z, rot6d(6), q_pre(8), q_final(8)] = 25D
+
+    Args:
+        grasp_state: [B, 25] grasp state tensor
+
+    Returns:
+        pose_9d: [B, 9]  palm pose (xyz + rot6d)
+        q_pre:   [B, 8]  pre-grasp joint angles
+        q_final: [B, 8]  final joint angles
+    """
+    pose_9d = grasp_state[:, :9]
+    q_pre = grasp_state[:, 9:17]
+    q_final = grasp_state[:, 17:25]
+    return pose_9d, q_pre, q_final
+
+
+def components_to_grasp_state(
+    pose_9d: torch.Tensor,
+    q_pre: torch.Tensor,
+    q_final: torch.Tensor,
+) -> torch.Tensor:
+    """Construct 25D TriFinger grasp state from components.
+
+    Args:
+        pose_9d: [B, 9]  palm pose (xyz + rot6d)
+        q_pre:   [B, 8]  pre-grasp joint angles
+        q_final: [B, 8]  final joint angles
+
+    Returns:
+        grasp_state: [B, 25]
+    """
+    return torch.cat([pose_9d, q_pre, q_final], dim=-1)
+
+
 def compute_pose_emd(poses1: torch.Tensor, poses2: torch.Tensor) -> float:
     """
     Compute EMD between two sets of poses with equal weighting of position and rotation.

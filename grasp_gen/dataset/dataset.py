@@ -1312,6 +1312,67 @@ class ObjectPickDataset(PickDataset):
         return outputs
 
 
+class TriFingerGraspDataset(ObjectPickDataset):
+    """Dataset for TriFinger 25D grasp state generation.
+
+    Extends ObjectPickDataset to additionally load:
+    - q_pre: [num_grasps, num_joints] pre-grasp joint angles
+    - q_final: [num_grasps, num_joints] final joint angles
+    - target_region_mask: [num_points] binary mask of target region on point cloud
+    - contact_heatmap: [num_points, num_fingers] per-finger contact probability heatmap
+
+    These fields are zero-padded when not present in the underlying data so that
+    the dataset can be used before simulation contact data is available.
+    """
+
+    def __init__(self, num_joints: int = 8, num_fingers: int = 3, **kwargs):
+        self.num_joints = num_joints
+        self.num_fingers = num_fingers
+        super().__init__(**kwargs)
+
+    @classmethod
+    def from_config(cls, cfg):
+        args = super().from_config(cfg)
+        args["num_joints"] = getattr(cfg, "num_joints", 8)
+        args["num_fingers"] = getattr(cfg, "num_fingers", 3)
+        return args
+
+    def __getitem__(self, idx):
+        outputs = super().__getitem__(idx)
+
+        if outputs.get("invalid", False):
+            return outputs
+
+        num_points = outputs["points"].shape[-2]
+        num_grasps = (
+            outputs["grasps"].shape[0]
+            if isinstance(outputs["grasps"], torch.Tensor)
+            else outputs["grasps"][0].shape[0]
+        )
+
+        # Inject q_pre and q_final — zeros until simulation data is available.
+        # Shape: [num_grasps, num_joints]. Training datasets should override this
+        # by sub-classing and loading actual joint trajectories from HDF5.
+        if "q_pre" not in outputs:
+            outputs["q_pre"] = torch.zeros(num_grasps, self.num_joints)
+        if "q_final" not in outputs:
+            outputs["q_final"] = torch.zeros(num_grasps, self.num_joints)
+
+        # Target region mask: [num_points] — which points belong to the target region.
+        # Set by upstream VLM/GroundingDINO/SAM2 pipeline at inference; during training
+        # you may generate this from bounding box annotations or object segmentation.
+        if "target_region_mask" not in outputs:
+            outputs["target_region_mask"] = torch.zeros(num_points)
+
+        # Contact heatmap: [num_points, num_fingers] — P(contact | point, finger).
+        # Generated from Isaac Sim contact reports mapped to the nearest object
+        # point-cloud point. Zero until simulation data is available.
+        if "contact_heatmap" not in outputs:
+            outputs["contact_heatmap"] = torch.zeros(num_points, self.num_fingers)
+
+        return outputs
+
+
 def generate_negative_hardnegatives(
     num_grasps: int,
     grasps_starter: np.ndarray,
