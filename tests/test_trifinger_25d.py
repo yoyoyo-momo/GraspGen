@@ -10,13 +10,11 @@ Tests:
 """
 
 import torch
-import pytest
 
 from grasp_gen.utils.math_utils import (
     components_to_grasp_state,
     grasp_state_to_components,
     rt_to_matrix,
-    matrix_to_rt,
 )
 
 NUM_JOINTS = 8
@@ -29,6 +27,7 @@ GRASP_REPR = "r3_6d"
 # ---------------------------------------------------------------------------
 # Helper factories
 # ---------------------------------------------------------------------------
+
 
 def random_pose_9d(B: int) -> torch.Tensor:
     """Random [B, 9] pose vector (xyz + rot6d)."""
@@ -52,6 +51,7 @@ def random_contact_heatmap(N: int) -> torch.Tensor:
 # Test 1: round-trip through helper functions
 # ---------------------------------------------------------------------------
 
+
 def test_grasp_state_round_trip():
     pose_9d = random_pose_9d(BATCH)
     q_pre, q_final = random_q(BATCH)
@@ -72,6 +72,7 @@ def test_grasp_state_round_trip():
 # ---------------------------------------------------------------------------
 # Test 2: pose_9d → T_palm
 # ---------------------------------------------------------------------------
+
 
 def test_rt_to_matrix_uses_only_first_9_dims():
     pose_9d = random_pose_9d(BATCH)
@@ -94,6 +95,7 @@ def test_rt_to_matrix_uses_only_first_9_dims():
 # Test 3: shape assertions
 # ---------------------------------------------------------------------------
 
+
 def test_shape_assertions():
     pose_9d = random_pose_9d(BATCH)
     q_pre, q_final = random_q(BATCH)
@@ -113,6 +115,7 @@ def test_shape_assertions():
 # ---------------------------------------------------------------------------
 # Tests 4 & 5: GraspGenGenerator forward passes (require CUDA/ROCm GPU)
 # ---------------------------------------------------------------------------
+
 
 def _build_generator():
     from grasp_gen.models.generator import GraspGenGenerator
@@ -174,6 +177,7 @@ def test_generator_forward_train():
 # Test 5: GraspGenGenerator forward_inference returns T_palm, q_pre, q_final
 # ---------------------------------------------------------------------------
 
+
 def test_generator_forward_inference():
     gen = _build_generator().cuda()
     gen.eval()
@@ -193,8 +197,12 @@ def test_generator_forward_inference():
     gs = outputs["grasp_state"]
 
     assert T_palm.shape[-2:] == (4, 4), f"Expected (..., 4, 4), got {T_palm.shape}"
-    assert q_pre.shape[-1] == NUM_JOINTS, f"Expected (..., {NUM_JOINTS}), got {q_pre.shape}"
-    assert q_final.shape[-1] == NUM_JOINTS, f"Expected (..., {NUM_JOINTS}), got {q_final.shape}"
+    assert q_pre.shape[-1] == NUM_JOINTS, (
+        f"Expected (..., {NUM_JOINTS}), got {q_pre.shape}"
+    )
+    assert q_final.shape[-1] == NUM_JOINTS, (
+        f"Expected (..., {NUM_JOINTS}), got {q_final.shape}"
+    )
     assert gs.shape[-1] == 9 + 2 * NUM_JOINTS, f"Expected 25D state, got {gs.shape}"
 
     print(
@@ -207,6 +215,7 @@ def test_generator_forward_inference():
 # Test 6: 25D state split correctness — joint dims must not bleed into pose
 # ---------------------------------------------------------------------------
 
+
 def test_joint_dims_do_not_affect_T_palm():
     """Changing joint dims must not change T_palm."""
     pose_9d = random_pose_9d(BATCH)
@@ -218,8 +227,9 @@ def test_joint_dims_do_not_affect_T_palm():
     T_palm_a = rt_to_matrix(state_a[:, :9], GRASP_REPR)
     T_palm_b = rt_to_matrix(state_b[:, :9], GRASP_REPR)
 
-    assert torch.allclose(T_palm_a, T_palm_b, atol=1e-6), \
+    assert torch.allclose(T_palm_a, T_palm_b, atol=1e-6), (
         "T_palm changed when only joint dims were modified — slice bug!"
+    )
 
     print("[PASS] test_joint_dims_do_not_affect_T_palm")
 

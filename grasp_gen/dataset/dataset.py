@@ -12,21 +12,21 @@
 """
 Data loader for training grasp models.
 """
+
 import glob
 import json
 import logging
 import os
 import random
 import time
-from typing import Tuple, Union
+from typing import Union
 
-import h5py
 import numpy as np
 
 try:
-    import pickle5 as pickle
-except:
-    import pickle
+    pass
+except Exception:
+    pass
 import torch
 import trimesh
 import trimesh.transformations as tra
@@ -37,7 +37,6 @@ from tqdm import tqdm
 
 from grasp_gen.dataset.dataset_utils import (
     GraspGenDatasetCache,
-    ObjectGraspDataset,
     dump_object_list,
     filter_grasps_by_point_cloud_visibility,
     load_from_json,
@@ -50,17 +49,11 @@ from grasp_gen.dataset.exceptions import DataLoaderError
 
 # NOTE: render_pc is imported lazily where needed to avoid forcing pyrender import in headless environments
 from grasp_gen.dataset.visualize_utils import (
-    MAPPING_ID2NAME,
     MAPPING_NAME2ID,
     visualize_discriminator_dataset,
     visualize_generator_dataset,
 )
 from grasp_gen.dataset.webdataset_utils import GraspWebDatasetReader, is_webdataset
-from grasp_gen.utils.meshcat_utils import (
-    create_visualizer,
-    visualize_pointcloud,
-    visualize_grasp,
-)
 from grasp_gen.robot import get_gripper_info
 from grasp_gen.utils.logging_config import get_logger
 
@@ -230,7 +223,6 @@ def load_grasps_with_contacts(
             continue
         masks.append(mask)
         names.append(name)
-        has_grasp = False
 
         if not load_grasp:
             continue
@@ -249,7 +241,6 @@ def load_grasps_with_contacts(
                 grasps = world2cam @ grasps
 
             if len(contacts.shape) == 3:
-
                 contact_dir = contacts[:, 1] - contacts[:, 0]
 
                 offset = contact_dir.norm(dim=1)
@@ -285,7 +276,6 @@ def load_grasps_with_contacts(
                 offsets[contact_mask] = offset[idx]
                 grasping_masks.append(contact_mask)
                 matched_grasps.append(grasps)
-                has_grasp = True
             elif inference:
                 grasping_masks.append(torch.zeros_like(mask))
                 matched_grasps.append(torch.zeros(0, 4, 4))
@@ -329,7 +319,6 @@ def load_grasps_with_contacts(
 
             # TODO: Explain clearly - this is for when offsets go OOB - some issue with contact points
             if outputs["offsets"].max().item() == 10:
-
                 return {"invalid": True}
     return outputs
 
@@ -421,7 +410,7 @@ class PickDataset(Dataset):
 
         self.denylist = load_from_json(self.denylist_path)
         if len(self.denylist) > 0:
-            if type(self.denylist) == dict:
+            if isinstance(self.denylist, dict):
                 self.denylist = list(self.denylist.keys())
 
         file_path = f"{root_dir}/{self.split}.txt"
@@ -497,7 +486,7 @@ class PickDataset(Dataset):
         assert self.onpolicy_dataset_h5_path is not None
         assert self.onpolicy_dataset_dir is not None
         # The below is to load the onpolicy dataset for the validation set. if no directory is found, it is set to None
-        if type(self.onpolicy_dataset_h5_path) == str and self.split == "valid":
+        if isinstance(self.onpolicy_dataset_h5_path, str) and self.split == "valid":
             if self.onpolicy_dataset_h5_path.find("train") >= 0:
                 onpolicy_dataset_h5_path_valid = self.onpolicy_dataset_h5_path.replace(
                     "train", "valid"
@@ -516,7 +505,6 @@ class PickDataset(Dataset):
                     self.onpolicy_dataset_dir = None
 
         if self.onpolicy_dataset_h5_path is not None:
-
             # Computing the mapping from object ids to json paths in the onpolicy dataset
             json_path_onpolicy_filename = os.path.join(
                 self._cache_dir, f"{os.path.basename(self.onpolicy_dataset_dir)}.json"
@@ -537,10 +525,6 @@ class PickDataset(Dataset):
                 )
                 import h5py
                 from tqdm import tqdm
-
-                from grasp_gen.dataset.dataset_utils import (
-                    get_json_file_given_object_id,
-                )
 
                 possible_grasp_keys = [
                     "grasps.json",
@@ -576,7 +560,7 @@ class PickDataset(Dataset):
                     map_object_id_to_uuid[h5_object_id] = uuid
 
                 map_basenameuuid_to_json_file = {}
-                logger.info(f"Onpolicy dataset: Parsing json file to UUID mappings")
+                logger.info("Onpolicy dataset: Parsing json file to UUID mappings")
                 for json_file_path in tqdm(json_files):
                     json_path_object_id = load_from_json(json_file_path)["object"][
                         "file"
@@ -595,7 +579,7 @@ class PickDataset(Dataset):
                         json_path = map_basenameuuid_to_json_file[
                             os.path.basename(map_object_id_to_uuid[key])
                         ]
-                    except:
+                    except Exception:
                         logger.info(
                             f"Onpolicy dataset: File path {map_object_id_to_uuid[key]}, key {key} not in dataset yet "
                         )
@@ -650,7 +634,7 @@ class PickDataset(Dataset):
             if self.onpolicy_dataset_dir is not None:
                 try:
                     onpolicy_json_path = self.map_key_to_json_path_online_dataset[key]
-                except:
+                except Exception:
                     onpolicy_data_found = False
 
             error_code, object_grasp_data = load_object_grasp_data(
@@ -681,7 +665,6 @@ class PickDataset(Dataset):
             rendering_output = []
             POINT_CLOUD_REDUNDANCY = 3
             for _ in range(self.redundancy):
-
                 mesh_mode = (
                     False if np.random.random() <= self.prob_point_cloud else True
                 )
@@ -819,7 +802,6 @@ class PickDataset(Dataset):
 
 
 class ObjectPickDataset(PickDataset):
-
     def calculate_dataset_kappa(self) -> float:
         """Calculate the mean extent of grasps across all objects in the dataset. See method section in the paper.
 
@@ -838,8 +820,6 @@ class ObjectPickDataset(PickDataset):
             if key in self.cache:
                 (object_grasp_data, outputs_red) = self.cache[key]
                 outputs = copy(random.choice(outputs_red))
-                mesh_mode = outputs["mesh_mode"]
-                load_contact_batch = outputs["load_contact_batch"]
                 mask = torch.randint(0, outputs["points"].shape[0], (self.num_points,))
                 outputs["points"] = outputs["points"][mask]
 
@@ -876,13 +856,12 @@ class ObjectPickDataset(PickDataset):
             outputs["points"] = outputs["points"][mask]
 
         else:
-
             onpolicy_json_path = None
             onpolicy_data_found = True
             if self.onpolicy_dataset_dir is not None:
                 try:
                     onpolicy_json_path = self.map_key_to_json_path_online_dataset[key]
-                except:
+                except Exception:
                     onpolicy_data_found = False
 
             error_code, object_grasp_data = load_object_grasp_data(
@@ -951,7 +930,7 @@ class ObjectPickDataset(PickDataset):
 
         # Extra stuff added to outputs later. TODO - Clean this all up
         xyz = outputs["points"]
-        if type(xyz) == np.ndarray:
+        if isinstance(xyz, np.ndarray):
             xyz = torch.from_numpy(xyz).float()
         num_points = self.num_points
         seg = 5 * np.ones(num_points).astype(np.int32)
@@ -1074,7 +1053,7 @@ class ObjectPickDataset(PickDataset):
         # TODO - make sure rotation_augmentation works with pc?
         if self.rotation_augmentation:
             pc = outputs["points"]
-            if type(pc) == torch.Tensor:
+            if isinstance(pc, torch.Tensor):
                 pc = pc.cpu().numpy()
 
             if len(pc.shape) == 3 and pc.shape[0] == 1:
@@ -1138,7 +1117,7 @@ class ObjectPickDataset(PickDataset):
                             positive_grasps_onpolicy = np.array(
                                 [T_aug @ g for g in positive_grasps_onpolicy]
                             )
-                except Exception as e:
+                except Exception:
                     # print(f"Error loading positive grasps onpolicy: {e}")
                     positive_grasps_onpolicy = None
 
@@ -1156,7 +1135,7 @@ class ObjectPickDataset(PickDataset):
                             negative_grasps_onpolicy = np.array(
                                 [T_aug @ g for g in negative_grasps_onpolicy]
                             )
-                except Exception as e:
+                except Exception:
                     # print(f"Error loading negative grasps onpolicy: {e}")
                     negative_grasps_onpolicy = None
 
@@ -1168,13 +1147,11 @@ class ObjectPickDataset(PickDataset):
             obj_asset_path_rel_idx = obj_asset_path.find(self.object_root_dir) + len(
                 self.object_root_dir
             )
-            obj_asset_path_rel = obj_asset_path[obj_asset_path_rel_idx:]
-        else:
-            obj_asset_path_rel = obj_asset_path
+            obj_asset_path[obj_asset_path_rel_idx:]
 
         try:
             trimesh.load(obj_asset_path)
-        except:
+        except Exception:
             logger.error(f"Error loading object asset path: {obj_asset_path}")
         obj_scale = object_grasp_data.object_scale
         obj_pose = T_move_to_pc_mean
@@ -1209,7 +1186,6 @@ class ObjectPickDataset(PickDataset):
         outputs["scene_info"] = scene_info
 
         if self.load_discriminator_dataset:
-
             positive_grasps = outputs["grasps"][0]
             negative_grasps = (
                 outputs["negative_grasps"]
@@ -1253,7 +1229,7 @@ class ObjectPickDataset(PickDataset):
                     logger.info(
                         f"Negative Grasps Onpolicy: {len(object_grasp_data.negative_grasps_onpolicy)}"
                     )
-                except:
+                except Exception:
                     pass
                 visualize_discriminator_dataset(
                     batch_data,
@@ -1263,7 +1239,6 @@ class ObjectPickDataset(PickDataset):
                     pointcloud=outputs["points"],
                 )
         else:
-
             if self.num_grasps_per_object != -1:
                 grasps_gt = outputs["grasps"][0]
 
@@ -1276,7 +1251,7 @@ class ObjectPickDataset(PickDataset):
 
             if not load_contact_batch:
                 for key in ["points"]:
-                    if type(outputs[key]) == np.ndarray:
+                    if isinstance(outputs[key], np.ndarray):
                         outputs[key] = torch.from_numpy(outputs[key])
                     outputs[key] = outputs[key].unsqueeze(0).repeat(1, 1, 1)
                 outputs["grasps"] = torch.from_numpy(
@@ -1290,7 +1265,7 @@ class ObjectPickDataset(PickDataset):
                     object_grasp_data.object_asset_path,
                 )
                 grasps_gt = outputs["grasps"]
-                if type(grasps_gt) == list and len(grasps_gt) == 1:
+                if isinstance(grasps_gt, list) and len(grasps_gt) == 1:
                     grasps_gt = grasps_gt[0]
                 if load_contact_batch:
                     contacts = object_grasp_data.contacts.copy()
@@ -1525,9 +1500,9 @@ def load_discriminator_batch_with_stratified_sampling(
     include_true_neg = grasps_negative is not None
     include_true_pos = grasps_positive is not None
 
-    assert not (
-        not include_true_pos and not include_true_neg
-    ), "Cannot have a situation where both positive and negative grasps are not in the batch"
+    assert not (not include_true_pos and not include_true_neg), (
+        "Cannot have a situation where both positive and negative grasps are not in the batch"
+    )
 
     num_pos_true_grasps = int(N * ratio[MAPPING_NAME2ID["pos_true"]])
     num_neg_true_grasps = int(N * ratio[MAPPING_NAME2ID["neg_true"]])
@@ -1653,7 +1628,6 @@ def load_discriminator_batch_with_stratified_sampling(
     )
 
     if grasps_neg_hncolliding is not None:
-
         num_neg_hncolliding_actual = len(grasps_neg_hncolliding)
         grasps_neg_hncolliding = torch.from_numpy(grasps_neg_hncolliding)
         grasps_id_neg_hncolliding = (
@@ -1719,7 +1693,5 @@ def collate_batch_keys(batch):
 
 
 def collate(batch):
-    initial_batch_size = len(batch)
     batch = [data for data in batch if not data.get("invalid", False)]
-    final_batch_size = len(batch)
     return collate_batch_keys(batch)

@@ -128,18 +128,18 @@ def rotation_from_vectors(v1, v2):
     u = v1 / np.linalg.norm(v1)
     Ru = v2 / np.linalg.norm(v2)
     dim = u.size
-    I = np.identity(dim)
+    eye = np.identity(dim)
     c = np.dot(u, Ru)
     eps = 1.0e-10
     if np.abs(c - 1.0) < eps:
         # same direction
-        return I
+        return eye
     elif np.abs(c + 1.0) < eps:
         # opposite direction
-        return -I
+        return -eye
     else:
         K = np.outer(Ru, u) - np.outer(u, Ru)
-        return I + K + (K @ K) / (1 + c)
+        return eye + K + (K @ K) / (1 + c)
 
 
 def construct_suction_grasp_from_point_and_vector(
@@ -223,7 +223,7 @@ def rotation_matrix_from_vectors(
     angle = torch.atan2(sin_theta, cos_theta)
 
     # Convert the axis-angle to a rotation matrix
-    rotation_matrix = axis_angle_to_matrix(axis * angle)
+    rotation_matrix = rotation_conversions.axis_angle_to_matrix(axis * angle)
 
     return rotation_matrix
 

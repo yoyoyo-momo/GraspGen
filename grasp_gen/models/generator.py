@@ -10,7 +10,6 @@
 # its affiliates is strictly prohibited.
 
 import os
-import time
 
 import numpy as np
 import torch
@@ -21,7 +20,6 @@ from scipy.spatial import KDTree
 from grasp_gen.utils.math_utils import (
     matrix_to_rt,
     rt_to_matrix,
-    grasp_state_to_components,
     components_to_grasp_state,
 )
 from grasp_gen.metrics import compute_metrics_given_two_sets_of_poses, compute_recall
@@ -168,7 +166,6 @@ class GraspGenGenerator(nn.Module):
         )
 
         if self.compositional_schedular:
-
             self.noise_scheduler_pos = DDPMScheduler(
                 num_train_timesteps=self.num_diffusion_iters,
                 beta_schedule="scaled_linear",
@@ -297,7 +294,7 @@ class GraspGenGenerator(nn.Module):
         depth = depth.reshape([-1, num_points, 3])
 
         grasps_init_size = [num_objects_in_batch, num_grasps_per_batch, 4, 4]
-        if type(grasps) == list:
+        if isinstance(grasps, list):
             grasps = torch.cat(grasps)
 
         grasps = grasps.reshape([-1, 4, 4])
@@ -386,10 +383,18 @@ class GraspGenGenerator(nn.Module):
         samples = noisy_grasps if self.pose_repr == "mlp" else None
         noise_pred = self.diffusion_head(object_embedding, timesteps, samples)
 
-        pred_noise_pts_mat = rt_to_matrix(noise_pred[:, :self.pose_dim], self.grasp_repr, self.kappa)
-        actual_noise_pts_mat = rt_to_matrix(noise[:, :self.pose_dim], self.grasp_repr, self.kappa)
-        noisy_grasps_mat = rt_to_matrix(noisy_grasps[:, :self.pose_dim], self.grasp_repr, self.kappa)
-        grasps_gt_mat = rt_to_matrix(grasps_gt[:, :self.pose_dim], self.grasp_repr, self.kappa)
+        pred_noise_pts_mat = rt_to_matrix(
+            noise_pred[:, : self.pose_dim], self.grasp_repr, self.kappa
+        )
+        actual_noise_pts_mat = rt_to_matrix(
+            noise[:, : self.pose_dim], self.grasp_repr, self.kappa
+        )
+        noisy_grasps_mat = rt_to_matrix(
+            noisy_grasps[:, : self.pose_dim], self.grasp_repr, self.kappa
+        )
+        grasps_gt_mat = rt_to_matrix(
+            grasps_gt[:, : self.pose_dim], self.grasp_repr, self.kappa
+        )
 
         stats = compute_metrics_given_two_sets_of_poses(
             actual_noise_pts_mat, pred_noise_pts_mat, self.gripper_info
@@ -425,7 +430,11 @@ class GraspGenGenerator(nn.Module):
             joint_loss = torch.mean(joint_loss)
             losses["joint_loss"] = (1.0, joint_loss)
 
-        grasp_state_init_size = [num_objects_in_batch, num_grasps_per_batch, self.output_dim]
+        grasp_state_init_size = [
+            num_objects_in_batch,
+            num_grasps_per_batch,
+            self.output_dim,
+        ]
         outputs = {}
         outputs["actual_noise_pts_mat"] = actual_noise_pts_mat.reshape(grasps_init_size)
         outputs["pred_noise_pts_mat"] = pred_noise_pts_mat.reshape(grasps_init_size)
@@ -454,7 +463,7 @@ class GraspGenGenerator(nn.Module):
 
         num_objects_in_batch = len(data["points"])
         if "grasps" in data:
-            if type(data["grasps"][0]) == list:
+            if isinstance(data["grasps"][0], list):
                 data["grasps"][0] = np.array(data["grasps"][0])
             num_grasps_per_batch = data["grasps"][0].shape[0]
         else:
@@ -470,7 +479,11 @@ class GraspGenGenerator(nn.Module):
         depth = depth.to(device)
 
         grasps_init_size = [num_objects_in_batch, num_grasps_per_batch, 4, 4]
-        grasp_state_init_size = [num_objects_in_batch, num_grasps_per_batch, self.output_dim]
+        grasp_state_init_size = [
+            num_objects_in_batch,
+            num_grasps_per_batch,
+            self.output_dim,
+        ]
 
         if self.kappa is not None:
             depth = self.kappa * depth
@@ -527,7 +540,7 @@ class GraspGenGenerator(nn.Module):
                     ctrl_pts = self.ctr_pts.to(device=device)
 
                     noisy_grasps_mat = rt_to_matrix(
-                        noisy_grasps[:, :self.pose_dim], self.grasp_repr, self.kappa
+                        noisy_grasps[:, : self.pose_dim], self.grasp_repr, self.kappa
                     )
                     grasp_pc = (noisy_grasps_mat @ ctrl_pts).transpose(-2, -1)[..., :3]
 
@@ -608,7 +621,6 @@ class GraspGenGenerator(nn.Module):
 
                     # Compute likelihood contribution
                     if k > 0:  # Skip first step
-                        alpha = self.noise_scheduler.alphas[k]
                         beta = self.noise_scheduler.betas[k]
                         var = beta
                         likelihood += (
@@ -622,24 +634,32 @@ class GraspGenGenerator(nn.Module):
 
                     noisy_grasps = res.prev_sample
 
-                pred_grasps = rt_to_matrix(noisy_grasps[:, :self.pose_dim], self.grasp_repr, self.kappa)
+                pred_grasps = rt_to_matrix(
+                    noisy_grasps[:, : self.pose_dim], self.grasp_repr, self.kappa
+                )
 
                 grasps_pred = pred_grasps.reshape(grasps_init_size)
 
                 grasps_per_iteration[:, iter_idx, :, ::] = grasps_pred
 
         # Final pose matrix
-        T_palm = rt_to_matrix(noisy_grasps[:, :self.pose_dim], self.grasp_repr, self.kappa)
+        T_palm = rt_to_matrix(
+            noisy_grasps[:, : self.pose_dim], self.grasp_repr, self.kappa
+        )
         T_palm = T_palm.reshape(grasps_init_size)
         T_palm[:, :, 3, 3] = 1  # proper homogeneous matrix
 
         # Split joint dims from the final denoised state
         q_pre_out = noisy_grasps[:, self.pose_dim : self.pose_dim + self.num_joints]
         q_final_out = noisy_grasps[:, self.pose_dim + self.num_joints : self.output_dim]
-        q_pre_out = q_pre_out.reshape([num_objects_in_batch, num_grasps_per_batch, self.num_joints])
-        q_final_out = q_final_out.reshape([num_objects_in_batch, num_grasps_per_batch, self.num_joints])
+        q_pre_out = q_pre_out.reshape(
+            [num_objects_in_batch, num_grasps_per_batch, self.num_joints]
+        )
+        q_final_out = q_final_out.reshape(
+            [num_objects_in_batch, num_grasps_per_batch, self.num_joints]
+        )
 
-        grasp_state_out = noisy_grasps.reshape([num_objects_in_batch, num_grasps_per_batch, self.output_dim])
+        grasp_state_out = noisy_grasps.reshape(grasp_state_init_size)
 
         grasps_pred = T_palm
 
@@ -648,7 +668,6 @@ class GraspGenGenerator(nn.Module):
         if return_metrics:
             all_stats = []
             for i in range(num_objects_in_batch):
-
                 grasps_pred_i = grasps_pred[i].cpu().numpy()
                 grasps_gt_i = data["grasps_highres"][i].cpu().numpy()
 
@@ -839,7 +858,6 @@ class DiffusionNoisePredictionNet(nn.Module):
             sample_embedding = self.sample_encoder(sample)
 
         if self.attention.find("attn") >= 0:
-
             if self.attention.find("cross") >= 0:
                 from grasp_gen.models.model_utils import repeat_new_axis
 
@@ -874,7 +892,6 @@ class DiffusionNoisePredictionNet(nn.Module):
                 )
 
                 for i in range(self.num_layers):
-
                     embed = self.cross_attention_layers[i](
                         embed,
                         cross_embed,
@@ -894,8 +911,6 @@ class DiffusionNoisePredictionNet(nn.Module):
             else:
                 from grasp_gen.models.model_utils import repeat_new_axis
 
-                t0 = time.time()
-
                 if self.pose_repr == "mlp":
                     embed = torch.cat(
                         [sample_embedding, timestep_embedding, observation_embedding],
@@ -913,9 +928,7 @@ class DiffusionNoisePredictionNet(nn.Module):
                     self.query_pos_enc.weight, batch_size, dim=1
                 )
 
-                t0 = time.time()
                 for i in range(self.num_layers):
-
                     embed = self.self_attention_layers[i](
                         embed,
                         embed,
@@ -927,7 +940,6 @@ class DiffusionNoisePredictionNet(nn.Module):
                 # print(f"Attention took {time.time() - t0}s")
             embed = embed.squeeze(0)
         else:
-            t0 = time.time()
             if self.pose_repr == "mlp":
                 embed = torch.cat(
                     [sample_embedding, timestep_embedding, observation_embedding],
