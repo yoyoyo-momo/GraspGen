@@ -1007,6 +1007,51 @@ def purge_redundant_checkpoints(list_of_dirs: List[str], execute: bool = True):
                     os.system(cmd)
 
 
+def contacts_to_heatmap(
+    finger_contacts: list,
+    point_cloud: np.ndarray,
+    sigma: float = 0.005,
+) -> np.ndarray:
+    """Project per-finger contact positions onto a point cloud as a Gaussian heatmap.
+
+    Args:
+        finger_contacts: list of length num_fingers; each element is a list of
+                         [x, y, z] contact positions for that finger (world frame).
+                         Pass contacts and point_cloud in the same coordinate frame.
+        point_cloud:     [N, 3] float32 array of surface points.
+        sigma:           Gaussian spread radius in metres (default 5 mm).
+
+    Returns:
+        heatmap: [N, num_fingers] float32 array, values in [0, 1].
+                 Multiple contacts per finger are max-pooled.
+    """
+    from sklearn.neighbors import KDTree
+
+    N = len(point_cloud)
+    num_fingers = len(finger_contacts)
+    heatmap = np.zeros((N, num_fingers), dtype=np.float32)
+
+    if N == 0:
+        return heatmap
+
+    tree = KDTree(point_cloud.astype(np.float64))
+    radius = 3.0 * sigma  # 3σ neighbourhood
+
+    for f_idx, contacts in enumerate(finger_contacts):
+        if not contacts:
+            continue
+        contacts_arr = np.array(contacts, dtype=np.float64)
+        for cp in contacts_arr:
+            idx = tree.query_radius(cp[None], r=radius)[0]
+            if len(idx) == 0:
+                continue
+            dists = np.linalg.norm(point_cloud[idx].astype(np.float64) - cp, axis=1)
+            weights = np.exp(-0.5 * (dists / sigma) ** 2).astype(np.float32)
+            heatmap[idx, f_idx] = np.maximum(heatmap[idx, f_idx], weights)
+
+    return heatmap  # [N, num_fingers]
+
+
 def get_rotation_augmentation(stratified_sampling: bool = True) -> np.ndarray:
     """
     Applies stratified sampling for rotation augmentation.

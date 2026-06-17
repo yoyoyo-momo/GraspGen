@@ -1340,12 +1340,40 @@ class TriFingerGraspDataset(ObjectPickDataset):
             outputs["target_region_mask"] = torch.zeros(num_points)
 
         # Contact heatmap: [num_points, num_fingers] — P(contact | point, finger).
-        # Generated from Isaac Sim contact reports mapped to the nearest object
-        # point-cloud point. Zero until simulation data is available.
+        # Loaded from a per-object NPZ produced by contacts_to_heatmap(); falls back
+        # to zeros until simulation contact data is available.
         if "contact_heatmap" not in outputs:
-            outputs["contact_heatmap"] = torch.zeros(num_points, self.num_fingers)
+            heatmap = self._load_contact_heatmap(
+                outputs.get("scene", ""), num_points
+            )
+            outputs["contact_heatmap"] = heatmap
 
         return outputs
+
+    def _load_contact_heatmap(self, scene_key: str, num_points: int) -> torch.Tensor:
+        """Load [num_points, num_fingers] heatmap from NPZ, or return zeros."""
+        if not scene_key or not self.grasp_root_dir:
+            return torch.zeros(num_points, self.num_fingers)
+
+        object_name = os.path.splitext(os.path.basename(scene_key))[0]
+        npz_path = os.path.join(
+            self.grasp_root_dir, "contact_heatmaps", f"{object_name}.npz"
+        )
+        if not os.path.exists(npz_path):
+            return torch.zeros(num_points, self.num_fingers)
+
+        try:
+            data = np.load(npz_path)
+            heatmap = data["heatmap"].astype(np.float32)  # [N_stored, num_fingers]
+            if heatmap.shape[0] != num_points:
+                # Stored point count differs from current sample — zero-pad or truncate
+                result = np.zeros((num_points, self.num_fingers), dtype=np.float32)
+                n = min(heatmap.shape[0], num_points)
+                result[:n] = heatmap[:n]
+                heatmap = result
+            return torch.from_numpy(heatmap)
+        except Exception:
+            return torch.zeros(num_points, self.num_fingers)
 
 
 def generate_negative_hardnegatives(

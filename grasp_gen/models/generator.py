@@ -24,10 +24,12 @@ from grasp_gen.utils.math_utils import (
 )
 from grasp_gen.metrics import compute_metrics_given_two_sets_of_poses, compute_recall
 from grasp_gen.models.model_utils import (
+    ContactHeatmapHead,
     PointNetPlusPlus,
     SinusoidalPosEmb,
     compute_grasp_loss,
     convert_to_ptv3_pc_format,
+    focal_loss_with_logits,
     load_pretrained_checkpoint_to_dict,
     offset2batch,
 )
@@ -67,6 +69,7 @@ class GraspGenGenerator(nn.Module):
         num_grasps_per_object (int): Number of grasps to generate per object. Default: 20
         checkpoint_object_encoder_pretrained (str): Path to pretrained object encoder. Default: None
         num_joints (int): Number of finger joints per grasp state (q_pre + q_final = 2*num_joints). Default: 8
+        num_fingers (int): Number of gripper fingers; sets contact heatmap output channels. Default: 3
     """
 
     def __init__(
@@ -93,6 +96,7 @@ class GraspGenGenerator(nn.Module):
         num_grasps_per_object: int = 20,
         checkpoint_object_encoder_pretrained: str = None,
         num_joints: int = 8,
+        num_fingers: int = 3,
     ):
         super().__init__()
 
@@ -118,6 +122,7 @@ class GraspGenGenerator(nn.Module):
         self.num_grasps_per_object = num_grasps_per_object
         self.checkpoint_object_encoder_pretrained = checkpoint_object_encoder_pretrained
         self.num_joints = num_joints
+        self.num_fingers = num_fingers
 
         if self.grasp_repr == "r3_6d":
             self.pose_dim = 9
@@ -165,6 +170,11 @@ class GraspGenGenerator(nn.Module):
             pose_repr=self.pose_repr,
         )
 
+        self.contact_heatmap_head = ContactHeatmapHead(
+            obs_dim=self.num_obs_dim,
+            num_fingers=self.num_fingers,
+        )
+
         if self.compositional_schedular:
             self.noise_scheduler_pos = DDPMScheduler(
                 num_train_timesteps=self.num_diffusion_iters,
@@ -195,6 +205,23 @@ class GraspGenGenerator(nn.Module):
         self.gripper_mesh = self.gripper_info.collision_mesh
         self.ctr_pts = self.gripper_info.control_points
 
+        # Joint angle normalization: map [lo, hi] → [-1, 1] for the diffusion model.
+        # clip_sample=True in DDPMScheduler clips to [-1, 1], so unnormalized radian
+        # values (e.g. A_3_joint lo = -2.094) would be clipped without this.
+        from grasp_gen.robot import load_default_gripper_config
+        _gcfg = load_default_gripper_config(self.gripper_name)
+        if "joint_limits" in _gcfg and self.num_joints > 0:
+            _limits = np.array(_gcfg["joint_limits"], dtype=np.float32)  # [num_joints, 2]
+            assert _limits.shape == (self.num_joints, 2), (
+                f"joint_limits in {self.gripper_name}.yaml has shape {_limits.shape}, "
+                f"expected ({self.num_joints}, 2)"
+            )
+            self.register_buffer("joint_lo", torch.from_numpy(_limits[:, 0]))
+            self.register_buffer("joint_hi", torch.from_numpy(_limits[:, 1]))
+        else:
+            self.joint_lo = None
+            self.joint_hi = None
+
         if self.checkpoint_object_encoder_pretrained is not None:
             if os.path.exists(self.checkpoint_object_encoder_pretrained):
                 model_state_dict_object_encoder = load_pretrained_checkpoint_to_dict(
@@ -208,6 +235,35 @@ class GraspGenGenerator(nn.Module):
                 logger.info(
                     f"Object encoder checkpoints not found at location {self.checkpoint_object_encoder_pretrained}"
                 )
+
+    def _normalize_joints(self, q: torch.Tensor) -> torch.Tensor:
+        """Map joint angles from radians to [-1, 1] using stored joint limits.
+
+        Args:
+            q: [..., num_joints] tensor in radians.
+        Returns:
+            Same shape tensor in [-1, 1].
+        """
+        if self.joint_lo is None:
+            return q
+        lo = self.joint_lo.to(q.device)
+        hi = self.joint_hi.to(q.device)
+        return 2.0 * (q - lo) / (hi - lo) - 1.0
+
+    def _denormalize_joints(self, q_norm: torch.Tensor) -> torch.Tensor:
+        """Map joint angles from [-1, 1] back to radians, clamped to joint limits.
+
+        Args:
+            q_norm: [..., num_joints] tensor in [-1, 1].
+        Returns:
+            Same shape tensor in radians, clamped to [joint_lo, joint_hi].
+        """
+        if self.joint_lo is None:
+            return q_norm
+        lo = self.joint_lo.to(q_norm.device)
+        hi = self.joint_hi.to(q_norm.device)
+        q = (q_norm + 1.0) / 2.0 * (hi - lo) + lo
+        return q.clamp(lo, hi)
 
     @classmethod
     def from_config(cls, cfg):
@@ -242,6 +298,7 @@ class GraspGenGenerator(nn.Module):
             "num_grasps_per_object": cfg.num_grasps_per_object,
             "checkpoint_object_encoder_pretrained": cfg.checkpoint_object_encoder_pretrained,
             "num_joints": getattr(cfg, "num_joints", 8),
+            "num_fingers": getattr(cfg, "num_fingers", 3),
         }
         return cls(**args)
 
@@ -302,6 +359,9 @@ class GraspGenGenerator(nn.Module):
         if self.kappa is not None:
             depth = self.kappa * depth
 
+        # Save xyz before potential ptv3 restructuring — needed by heatmap head
+        depth_xyz = depth  # [num_objects_in_batch, N, 3]
+
         if self.obs_backbone == "ptv3":
             depth = convert_to_ptv3_pc_format(depth, grid_size=self.grid_size)
 
@@ -314,6 +374,11 @@ class GraspGenGenerator(nn.Module):
         else:
             q_pre = torch.zeros([batch_size, self.num_joints], device=device)
             q_final = torch.zeros([batch_size, self.num_joints], device=device)
+
+        # Normalize joints from radians to [-1, 1] so DDPMScheduler clip_sample
+        # does not truncate values that legitimately exceed ±1 in radian space.
+        q_pre = self._normalize_joints(q_pre)
+        q_final = self._normalize_joints(q_final)
 
         grasps_gt = components_to_grasp_state(pose_9d, q_pre, q_final)
 
@@ -360,10 +425,12 @@ class GraspGenGenerator(nn.Module):
             object_embedding = self.object_encoder(
                 depth
             )  # object_embedding size is [num_objects_in_batch, self.num_obs_dim]
+            per_obj_embedding = object_embedding  # save before redistribution for heatmap head
             object_embedding = object_embedding[
                 mask_batch
             ]  # Redistribute object embeddings to full batch, result is [batch_size, self.num_obs_dim]
         else:
+            per_obj_embedding = None
             raise NotImplementedError(f"Pose repr {self.pose_repr} not implemented!")
 
         if self.compositional_schedular:
@@ -446,6 +513,21 @@ class GraspGenGenerator(nn.Module):
         outputs["grasp_state_gt"] = grasps_gt.reshape(grasp_state_init_size)
         outputs["grasp_state_noisy"] = noisy_grasps.reshape(grasp_state_init_size)
 
+        # Contact heatmap prediction (only for mlp pose_repr where per_obj_embedding is available)
+        if per_obj_embedding is not None:
+            heatmap_pred = self.contact_heatmap_head(depth_xyz, per_obj_embedding)
+            outputs["contact_heatmap_pred"] = heatmap_pred.sigmoid()
+            if "contact_heatmap" in data:
+                heatmap_gt = data["contact_heatmap"]
+                if isinstance(heatmap_gt, list):
+                    heatmap_gt = torch.stack(heatmap_gt)
+                heatmap_gt = heatmap_gt.to(device).float()
+                if heatmap_gt.sum() > 0:
+                    losses["contact_heatmap"] = (
+                        1.0,
+                        focal_loss_with_logits(heatmap_pred, heatmap_gt),
+                    )
+
         return outputs, losses, stats
 
     def forward_inference(self, data, return_metrics=False):
@@ -488,6 +570,8 @@ class GraspGenGenerator(nn.Module):
         if self.kappa is not None:
             depth = self.kappa * depth
 
+        depth_xyz = depth  # save xyz before potential ptv3 restructuring
+
         if self.obs_backbone == "ptv3":
             depth = convert_to_ptv3_pc_format(depth, grid_size=self.grid_size)
 
@@ -521,6 +605,7 @@ class GraspGenGenerator(nn.Module):
                 object_embedding = self.object_encoder(
                     depth
                 )  # object_embedding size is [num_objects_in_batch, self.num_obs_dim]
+                per_obj_embedding = object_embedding  # save before redistribution for heatmap head
                 object_embedding = object_embedding[
                     mask_batch
                 ]  # Redistribute object embeddings to full batch, result is [batch_size, self.num_obs_dim]
@@ -649,9 +734,12 @@ class GraspGenGenerator(nn.Module):
         T_palm = T_palm.reshape(grasps_init_size)
         T_palm[:, :, 3, 3] = 1  # proper homogeneous matrix
 
-        # Split joint dims from the final denoised state
+        # Split joint dims from the final denoised state and convert back to radians.
+        # noisy_grasps contains normalized joints ([-1, 1]); denormalize to physical units.
         q_pre_out = noisy_grasps[:, self.pose_dim : self.pose_dim + self.num_joints]
         q_final_out = noisy_grasps[:, self.pose_dim + self.num_joints : self.output_dim]
+        q_pre_out = self._denormalize_joints(q_pre_out)
+        q_final_out = self._denormalize_joints(q_final_out)
         q_pre_out = q_pre_out.reshape(
             [num_objects_in_batch, num_grasps_per_batch, self.num_joints]
         )
@@ -721,6 +809,12 @@ class GraspGenGenerator(nn.Module):
                 num_objects_in_batch, num_grasps_per_batch, 1
             ),
         }
+
+        # Contact heatmap — exposed at inference for debugging / downstream use
+        if self.pose_repr == "mlp":
+            heatmap = self.contact_heatmap_head(depth_xyz, per_obj_embedding)
+            outputs["contact_heatmap"] = heatmap.sigmoid()  # [num_objects, N, num_fingers]
+
         return outputs, {}, stats_batch
 
 

@@ -117,6 +117,71 @@ def compute_grasp_loss(target_grasps, pred_grasps, ctr_pts):
     return torch.mean(loss)  # Mean over batch
 
 
+def focal_loss_with_logits(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    gamma: float = 2.0,
+    alpha: float = 0.25,
+) -> torch.Tensor:
+    """Focal loss for sparse binary labels (e.g. contact heatmaps).
+
+    Down-weights easy negatives so the model focuses on ambiguous contact
+    regions rather than being dominated by the majority of non-contact points.
+
+    Args:
+        pred:   Raw logits, any shape.
+        target: Binary labels in [0, 1], same shape as pred.
+        gamma:  Focusing exponent. Higher = stronger down-weighting of easy examples.
+        alpha:  Class-balance weight for the positive class.
+    """
+    bce = torch.nn.functional.binary_cross_entropy_with_logits(
+        pred, target, reduction="none"
+    )
+    p_t = torch.sigmoid(pred) * target + (1 - torch.sigmoid(pred)) * (1 - target)
+    alpha_t = alpha * target + (1 - alpha) * (1 - target)
+    return (alpha_t * (1 - p_t) ** gamma * bce).mean()
+
+
+class ContactHeatmapHead(nn.Module):
+    """Per-point contact probability predictor for multi-finger grippers.
+
+    For every point in the object point cloud, predicts the probability that
+    each finger should contact (or will contact) that point during grasping.
+
+    Architecture: broadcast the global object embedding to every point,
+    concatenate with the point's xyz, then run a shared MLP.
+
+    Args:
+        obs_dim:     Dimension of the global object embedding (from PointNet++).
+        num_fingers: Number of gripper fingers (output channels).
+        hidden_dim:  Width of the MLP hidden layers.
+    """
+
+    def __init__(self, obs_dim: int = 512, num_fingers: int = 3, hidden_dim: int = 256):
+        super().__init__()
+        self.mlp = nn.Sequential(
+            nn.Linear(3 + obs_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+            nn.Linear(hidden_dim // 2, num_fingers),
+        )
+
+    def forward(self, points: torch.Tensor, global_embedding: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            points:           [B, N, 3]  — point cloud xyz (kappa-scaled if applicable)
+            global_embedding: [B, obs_dim] — output of the object encoder
+
+        Returns:
+            logits: [B, N, num_fingers]  — apply sigmoid for probabilities
+        """
+        B, N, _ = points.shape
+        emb = global_embedding.unsqueeze(1).expand(-1, N, -1)  # [B, N, obs_dim]
+        x = torch.cat([points, emb], dim=-1)  # [B, N, 3+obs_dim]
+        return self.mlp(x)  # [B, N, num_fingers]
+
+
 def get_activation_fn(activation):
     return getattr(nn, activation)()
 
