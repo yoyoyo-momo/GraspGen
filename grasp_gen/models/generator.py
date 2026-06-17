@@ -209,9 +209,12 @@ class GraspGenGenerator(nn.Module):
         # clip_sample=True in DDPMScheduler clips to [-1, 1], so unnormalized radian
         # values (e.g. A_3_joint lo = -2.094) would be clipped without this.
         from grasp_gen.robot import load_default_gripper_config
+
         _gcfg = load_default_gripper_config(self.gripper_name)
         if "joint_limits" in _gcfg and self.num_joints > 0:
-            _limits = np.array(_gcfg["joint_limits"], dtype=np.float32)  # [num_joints, 2]
+            _limits = np.array(
+                _gcfg["joint_limits"], dtype=np.float32
+            )  # [num_joints, 2]
             assert _limits.shape == (self.num_joints, 2), (
                 f"joint_limits in {self.gripper_name}.yaml has shape {_limits.shape}, "
                 f"expected ({self.num_joints}, 2)"
@@ -425,7 +428,9 @@ class GraspGenGenerator(nn.Module):
             object_embedding = self.object_encoder(
                 depth
             )  # object_embedding size is [num_objects_in_batch, self.num_obs_dim]
-            per_obj_embedding = object_embedding  # save before redistribution for heatmap head
+            per_obj_embedding = (
+                object_embedding  # save before redistribution for heatmap head
+            )
             object_embedding = object_embedding[
                 mask_batch
             ]  # Redistribute object embeddings to full batch, result is [batch_size, self.num_obs_dim]
@@ -605,7 +610,9 @@ class GraspGenGenerator(nn.Module):
                 object_embedding = self.object_encoder(
                     depth
                 )  # object_embedding size is [num_objects_in_batch, self.num_obs_dim]
-                per_obj_embedding = object_embedding  # save before redistribution for heatmap head
+                per_obj_embedding = (
+                    object_embedding  # save before redistribution for heatmap head
+                )
                 object_embedding = object_embedding[
                     mask_batch
                 ]  # Redistribute object embeddings to full batch, result is [batch_size, self.num_obs_dim]
@@ -813,7 +820,9 @@ class GraspGenGenerator(nn.Module):
         # Contact heatmap — exposed at inference for debugging / downstream use
         if self.pose_repr == "mlp":
             heatmap = self.contact_heatmap_head(depth_xyz, per_obj_embedding)
-            outputs["contact_heatmap"] = heatmap.sigmoid()  # [num_objects, N, num_fingers]
+            outputs["contact_heatmap"] = (
+                heatmap.sigmoid()
+            )  # [num_objects, N, num_fingers]
 
         return outputs, {}, stats_batch
 

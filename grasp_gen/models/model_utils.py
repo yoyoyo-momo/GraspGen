@@ -10,6 +10,7 @@
 """
 Utility functions for network.
 """
+
 import collections
 import math
 
@@ -167,7 +168,9 @@ class ContactHeatmapHead(nn.Module):
             nn.Linear(hidden_dim // 2, num_fingers),
         )
 
-    def forward(self, points: torch.Tensor, global_embedding: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self, points: torch.Tensor, global_embedding: torch.Tensor
+    ) -> torch.Tensor:
         """
         Args:
             points:           [B, N, 3]  — point cloud xyz (kappa-scaled if applicable)

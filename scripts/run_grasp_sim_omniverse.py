@@ -30,6 +30,7 @@ try:
     from omni.isaac.core import World
     from omni.isaac.core.articulations import Articulation
     from omni.isaac.core.utils.types import ArticulationAction
+
     ISAAC_AVAILABLE = True
 except ImportError:
     ISAAC_AVAILABLE = False
@@ -61,6 +62,7 @@ CLOSED_JOINT_LIMIT = "lower"
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _get_articulation_roots_under_world(stage):
     """Return prim paths of articulation roots under /World (Env_*/gripper)."""
     roots = []
@@ -84,7 +86,7 @@ def _get_closed_joint_positions(articulation, use_lower=True):
     if limits is None or len(limits) != len(joint_names):
         return None
     pos = []
-    for (low, high) in limits:
+    for low, high in limits:
         pos.append(float(low) if use_lower else float(high))
     return np.array(pos, dtype=np.float64)
 
@@ -108,14 +110,16 @@ def _build_contact_recorder(num_envs: int, finger_links: list):
     """
     try:
         from omni.physx import get_physx_interface
+
         physx = get_physx_interface()
     except ImportError:
-        print("run_grasp_sim_omniverse: omni.physx not available — contact recording disabled.")
+        print(
+            "run_grasp_sim_omniverse: omni.physx not available — contact recording disabled."
+        )
         return None, None
 
     env_contacts = {
-        i: {f: [] for f in range(len(finger_links))}
-        for i in range(num_envs)
+        i: {f: [] for f in range(len(finger_links))} for i in range(num_envs)
     }
 
     def _record_contacts(dt):
@@ -151,14 +155,17 @@ def _build_contact_recorder(num_envs: int, finger_links: list):
 # Main entry
 # ---------------------------------------------------------------------------
 
+
 def run_grasp_on_play():
     """Register timestep callbacks so that after Play:
-      1. Grippers close (at GRASP_CLOSE_DELAY_S).
-      2. Contacts are sampled (at GRASP_CLOSE_DELAY_S + CONTACT_SETTLE_DELAY_S).
-      3. Contact JSON is written to CONTACT_OUTPUT_PATH.
+    1. Grippers close (at GRASP_CLOSE_DELAY_S).
+    2. Contacts are sampled (at GRASP_CLOSE_DELAY_S + CONTACT_SETTLE_DELAY_S).
+    3. Contact JSON is written to CONTACT_OUTPUT_PATH.
     """
     if not ISAAC_AVAILABLE:
-        print("run_grasp_sim_omniverse: omni.isaac.core not available. Run inside Isaac Sim.")
+        print(
+            "run_grasp_sim_omniverse: omni.isaac.core not available. Run inside Isaac Sim."
+        )
         return
 
     from omni.isaac.core.utils.stage import get_current_stage
@@ -166,17 +173,23 @@ def run_grasp_on_play():
 
     stage = get_current_stage()
     if not stage:
-        print("run_grasp_sim_omniverse: No stage open. Open box_with_grasps_sim.usd first.")
+        print(
+            "run_grasp_sim_omniverse: No stage open. Open box_with_grasps_sim.usd first."
+        )
         return
 
     root_paths = _get_articulation_roots_under_world(stage)
     if not root_paths:
-        print("run_grasp_sim_omniverse: No /World/Env_*/gripper articulation roots found.")
+        print(
+            "run_grasp_sim_omniverse: No /World/Env_*/gripper articulation roots found."
+        )
         return
 
     world = World.instance()
     if world is None:
-        print("run_grasp_sim_omniverse: World not initialized. Press Play once, then re-run.")
+        print(
+            "run_grasp_sim_omniverse: World not initialized. Press Play once, then re-run."
+        )
         return
 
     articulations = []
@@ -188,7 +201,9 @@ def run_grasp_on_play():
         articulations.append(art)
 
     num_envs = len(root_paths)
-    contact_callback, env_contacts = _build_contact_recorder(num_envs, TRIFINGER_FINGER_LINKS)
+    contact_callback, env_contacts = _build_contact_recorder(
+        num_envs, TRIFINGER_FINGER_LINKS
+    )
 
     # ------------------------------------------------------------------
     # Phase 1: close grippers
@@ -216,8 +231,7 @@ def run_grasp_on_play():
 
         output = {
             str(env_idx): {
-                str(f_idx): contacts
-                for f_idx, contacts in finger_data.items()
+                str(f_idx): contacts for f_idx, contacts in finger_data.items()
             }
             for env_idx, finger_data in env_contacts.items()
         }
@@ -226,11 +240,7 @@ def run_grasp_on_play():
         with open(output_path, "w") as fh:
             json.dump(output, fh, indent=2)
 
-        total = sum(
-            len(c)
-            for fd in env_contacts.values()
-            for c in fd.values()
-        )
+        total = sum(len(c) for fd in env_contacts.values() for c in fd.values())
         print(
             f"run_grasp_sim_omniverse: Saved {total} contact points across "
             f"{num_envs} env(s) to {output_path}"

@@ -237,6 +237,7 @@ def test_joint_dims_do_not_affect_T_palm():
 # Test 7: ContactHeatmapHead + focal_loss_with_logits
 # ---------------------------------------------------------------------------
 
+
 def test_contact_heatmap_head():
     from grasp_gen.models.model_utils import ContactHeatmapHead, focal_loss_with_logits
 
@@ -248,15 +249,21 @@ def test_contact_heatmap_head():
     embedding = torch.randn(B, OBS, device=device)
 
     logits = head(points, embedding)
-    assert logits.shape == (B, N, NUM_FINGERS), f"Expected ({B},{N},{NUM_FINGERS}), got {logits.shape}"
+    assert logits.shape == (B, N, NUM_FINGERS), (
+        f"Expected ({B},{N},{NUM_FINGERS}), got {logits.shape}"
+    )
 
     # Focal loss with sparse targets (most zeros, simulating real contact heatmaps)
     target = torch.zeros(B, N, NUM_FINGERS, device=device)
     target[:, :5, :] = 1.0  # only 5 points per object have contact
     loss = focal_loss_with_logits(logits, target)
-    assert loss.ndim == 0 and loss.item() >= 0, "focal_loss must be a non-negative scalar"
+    assert loss.ndim == 0 and loss.item() >= 0, (
+        "focal_loss must be a non-negative scalar"
+    )
 
-    print(f"[PASS] test_contact_heatmap_head  logits={logits.shape}  loss={loss.item():.4f}")
+    print(
+        f"[PASS] test_contact_heatmap_head  logits={logits.shape}  loss={loss.item():.4f}"
+    )
 
 
 def test_generator_heatmap_in_forward_train():
@@ -276,10 +283,14 @@ def test_generator_heatmap_in_forward_train():
     assert "contact_heatmap_pred" in outputs, "Missing contact_heatmap_pred in outputs"
     assert "contact_heatmap" in losses, "Missing contact_heatmap loss"
     pred = outputs["contact_heatmap_pred"]
-    assert pred.shape == (1, NUM_PC_POINTS, NUM_FINGERS), f"Bad heatmap shape: {pred.shape}"
+    assert pred.shape == (1, NUM_PC_POINTS, NUM_FINGERS), (
+        f"Bad heatmap shape: {pred.shape}"
+    )
     assert pred.min() >= 0 and pred.max() <= 1, "Heatmap predictions must be in [0,1]"
 
-    print(f"[PASS] test_generator_heatmap_in_forward_train  pred={pred.shape}  loss={losses['contact_heatmap'][1].item():.4f}")
+    print(
+        f"[PASS] test_generator_heatmap_in_forward_train  pred={pred.shape}  loss={losses['contact_heatmap'][1].item():.4f}"
+    )
 
 
 def test_generator_heatmap_in_forward_inference():
@@ -292,10 +303,16 @@ def test_generator_heatmap_in_forward_inference():
 
     assert "contact_heatmap" in outputs, "Missing contact_heatmap in inference outputs"
     heatmap = outputs["contact_heatmap"]
-    assert heatmap.shape == (1, NUM_PC_POINTS, NUM_FINGERS), f"Bad heatmap shape: {heatmap.shape}"
-    assert heatmap.min() >= 0 and heatmap.max() <= 1, "Heatmap must be in [0,1] at inference"
+    assert heatmap.shape == (1, NUM_PC_POINTS, NUM_FINGERS), (
+        f"Bad heatmap shape: {heatmap.shape}"
+    )
+    assert heatmap.min() >= 0 and heatmap.max() <= 1, (
+        "Heatmap must be in [0,1] at inference"
+    )
 
-    print(f"[PASS] test_generator_heatmap_in_forward_inference  heatmap={heatmap.shape}")
+    print(
+        f"[PASS] test_generator_heatmap_in_forward_inference  heatmap={heatmap.shape}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -313,47 +330,56 @@ def test_joint_normalization_round_trip():
 
     cfg = load_default_gripper_config("trifinger")
     import numpy as np
+
     limits = np.array(cfg["joint_limits"], dtype=np.float32)  # [8, 2]
     lo = torch.tensor(limits[:, 0]).cuda()
     hi = torch.tensor(limits[:, 1]).cuda()
 
     # Lower limits must map to -1
     lo_norm = gen._normalize_joints(lo.unsqueeze(0))
-    assert torch.allclose(lo_norm, -torch.ones(1, NUM_JOINTS, device="cuda"), atol=1e-5), \
-        f"lower limits should normalize to -1, got {lo_norm}"
+    assert torch.allclose(
+        lo_norm, -torch.ones(1, NUM_JOINTS, device="cuda"), atol=1e-5
+    ), f"lower limits should normalize to -1, got {lo_norm}"
 
     # Upper limits must map to +1
     hi_norm = gen._normalize_joints(hi.unsqueeze(0))
-    assert torch.allclose(hi_norm, torch.ones(1, NUM_JOINTS, device="cuda"), atol=1e-5), \
-        f"upper limits should normalize to +1, got {hi_norm}"
+    assert torch.allclose(
+        hi_norm, torch.ones(1, NUM_JOINTS, device="cuda"), atol=1e-5
+    ), f"upper limits should normalize to +1, got {hi_norm}"
 
     # Midpoint must map to 0
     mid = ((lo + hi) / 2).unsqueeze(0)
     mid_norm = gen._normalize_joints(mid)
-    assert torch.allclose(mid_norm, torch.zeros(1, NUM_JOINTS, device="cuda"), atol=1e-5), \
-        f"midpoint should normalize to 0, got {mid_norm}"
+    assert torch.allclose(
+        mid_norm, torch.zeros(1, NUM_JOINTS, device="cuda"), atol=1e-5
+    ), f"midpoint should normalize to 0, got {mid_norm}"
 
     # Round-trip: arbitrary values within limits survive exactly
     q_rad = lo + (hi - lo) * torch.rand(BATCH, NUM_JOINTS, device="cuda")
     q_rt = gen._denormalize_joints(gen._normalize_joints(q_rad))
-    assert torch.allclose(q_rad, q_rt, atol=1e-5), "normalize → denormalize round-trip failed"
+    assert torch.allclose(q_rad, q_rt, atol=1e-5), (
+        "normalize → denormalize round-trip failed"
+    )
 
     # Values in [-1, 1] after normalization
     assert q_rad.min() >= lo.min() - 1e-4
     norm_vals = gen._normalize_joints(q_rad)
-    assert norm_vals.min().item() >= -1.001 and norm_vals.max().item() <= 1.001, \
+    assert norm_vals.min().item() >= -1.001 and norm_vals.max().item() <= 1.001, (
         "normalized values must be in [-1, 1]"
+    )
 
     # Denormalized inference output must be clamped to joint limits
     oob = torch.full((1, NUM_JOINTS), 2.0, device="cuda")  # way out of [-1, 1]
     clamped = gen._denormalize_joints(oob)
-    assert torch.allclose(clamped, hi.unsqueeze(0), atol=1e-5), \
+    assert torch.allclose(clamped, hi.unsqueeze(0), atol=1e-5), (
         "out-of-range positive should clamp to upper limit"
+    )
 
     oob_neg = torch.full((1, NUM_JOINTS), -2.0, device="cuda")
     clamped_neg = gen._denormalize_joints(oob_neg)
-    assert torch.allclose(clamped_neg, lo.unsqueeze(0), atol=1e-5), \
+    assert torch.allclose(clamped_neg, lo.unsqueeze(0), atol=1e-5), (
         "out-of-range negative should clamp to lower limit"
+    )
 
     print("[PASS] test_joint_normalization_round_trip")
 

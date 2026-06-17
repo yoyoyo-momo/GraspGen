@@ -12,52 +12,34 @@
 """
 Utility functions for data preprocessing.
 """
+
 import glob
-import io
 import json
-import logging
 import os
 import time
-from typing import Dict, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Tuple, Union
 
 import h5py
-import imageio
 import numpy as np
-import scipy
 import torch
-import torch.nn.functional as F
 import trimesh
 import trimesh.transformations as tra
 from tqdm import tqdm
 
-from grasp_gen.utils.logging_config import get_logger
-
-logger = get_logger(__name__)
-
-from dataclasses import dataclass
-from typing import Dict, List, Tuple, Union
-
 from grasp_gen.dataset.eval_utils import (
-    is_empty,
     load_h5_handle_empty_case,
     write_info,
-    write_to_h5,
 )
 from grasp_gen.dataset.exceptions import DataLoaderError
 from grasp_gen.dataset.webdataset_utils import GraspWebDatasetReader
+from grasp_gen.utils.logging_config import get_logger
 from grasp_gen.utils.meshcat_utils import (
     create_visualizer,
-    get_normals_from_mesh,
     visualize_grasp,
-    visualize_mesh,
-    visualize_pointcloud,
 )
-from grasp_gen.robot import GripperInfo
 
-try:
-    import cv2
-except:
-    pass
+logger = get_logger(__name__)
 
 
 class GraspJsonDatasetReader:
@@ -268,7 +250,7 @@ def filter_grasps_by_point_cloud_visibility(
     grasps_tool_tip_locations = torch.from_numpy(
         grasps_tool_tip_locations
     ).float()  # (N1, 3)
-    if type(pointcloud) == np.ndarray:
+    if isinstance(pointcloud, np.ndarray):
         pointcloud = torch.from_numpy(pointcloud).float()  # (N2, 3)
 
     norm = 1
@@ -313,7 +295,6 @@ class GraspGenDatasetCache(dict):
         for key_h5 in tqdm(
             h5_file.keys(), desc=f"Loading cache from H5 file: {path_to_h5_file}"
         ):
-
             h5_obj = h5_file[key_h5]
             renderings = []
             object_grasp_data = ObjectGraspDataset.from_dict(h5_obj["grasp_data"])
@@ -352,7 +333,6 @@ class GraspGenDatasetCache(dict):
         for key, (object_grasp_data, rendering_output) in tqdm(
             self._cache.items(), desc=f"Saving cache to H5 file: {path_to_h5_file}"
         ):
-
             if key.find("/") >= 0:
                 key_h5 = key.replace(
                     "/", "____"
@@ -490,7 +470,7 @@ def compute_emd_data(
                     for _ in range(num_samples)
                 ]
             data["off-on-neg"] = np.mean(emds)
-    except:
+    except Exception:
         from IPython import embed
 
         embed()
@@ -506,7 +486,6 @@ def visualize_object_grasp_dataset(
 ):
 
     grasps = ogd.positive_grasps
-    contacts = ogd.contacts
     negative_grasps = ogd.negative_grasps
     positive_grasps_onpolicy = ogd.positive_grasps_onpolicy
     negative_grasps_onpolicy = ogd.negative_grasps_onpolicy
@@ -668,9 +647,6 @@ def load_onpolicy_dataset(
     json_path = onpolicy_json_path
 
     pred_grasps = h5_obj["pred_grasps"][...]
-    gt_grasps = h5_obj["gt_grasps"][
-        ...
-    ]  # TODO: This is not real ground truth. Replace this...
     scores = h5_obj["confidence"][...]
     collision = h5_obj["collision"][...]
     mask_not_colliding = np.logical_not(collision)
@@ -678,12 +654,11 @@ def load_onpolicy_dataset(
     data = json.load(open(json_path, "rb"))
     try:
         num_grasps_attempted_igg = len(data["grasps"]["transforms"])
-    except:
+    except Exception:
         logger.error(f"ONPOLICY: Error in opening file {key}: {onpolicy_json_path}")
         return None, None
     # pred_grasps2 = np.array(data['grasps']['transforms'])
     mask_eval_success = np.array(data["grasps"]["object_in_gripper"])
-    num_successful_attempts = np.sum(mask_eval_success)
     success_result = np.zeros(len(scores))
 
     try:
@@ -691,7 +666,7 @@ def load_onpolicy_dataset(
         assert (
             num_grasps_attempted_inference == num_grasps_attempted_igg
         )  # Sanity check if the object id in h5 files (inference) is the same as the index in the evaluated json files (IGG)
-    except:
+    except Exception:
         logger.error(
             f"ONPOLICY: Number of attempted grasps in h5 file (predicted) and Issac Sim does not match... {num_grasps_attempted_inference} vs. {num_grasps_attempted_igg} for object {key}."
         )
@@ -752,7 +727,6 @@ def load_object_grasp_acronym(
         positive_grasps = grasps[success]
 
         if load_discriminator_dataset:
-
             not_success = np.logical_not(
                 success_og[grasp_data["grasp_ids"]]
             ) & np.logical_not(grasp_data["successful"].astype("bool"))
@@ -776,7 +750,7 @@ def load_object_grasp_acronym(
                     None,
                 )
 
-    except:
+    except Exception:
         logger.error("ERROR: grasp_transform.npy is corrupted for ", object_name)
         return DataLoaderError.GRASPS_FILE_LOAD_ERROR, None
 
@@ -784,7 +758,7 @@ def load_object_grasp_acronym(
 
     try:
         contacts = grasp_data["contact_points"][success]
-    except:
+    except Exception:
         logger.error(f"Contact not loaded for key {key}")
         return DataLoaderError.GRASPS_FILE_LOAD_ERROR, None
 
@@ -901,7 +875,7 @@ def load_object_grasp_datapoint_objaverse(
                 logger.error(f"Object mesh not found, at {object_file}")
                 return DataLoaderError.OBJECT_MESH_NOT_FOUND, None
 
-        except Exception as e:
+        except Exception:
             return DataLoaderError.UUID_MAPPING_LOAD_ERROR, None
 
     object_scale = grasps_dict["object"]["scale"]
@@ -945,11 +919,11 @@ def load_object_grasp_datapoint_objaverse(
     try:
         object_mesh = trimesh.load(object_file)
 
-        if type(object_mesh) == trimesh.Scene:
+        if isinstance(object_mesh, trimesh.Scene):
             object_mesh = object_mesh.dump(concatenate=True)
 
         object_mesh.apply_scale(object_scale)
-    except:
+    except Exception:
         logger.debug(f"Unable to load object mesh at {object_file}")
         return DataLoaderError.OBJECT_MESH_LOAD_ERROR, None
 

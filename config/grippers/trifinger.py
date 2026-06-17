@@ -52,10 +52,12 @@ class GripperModel:
 def load_control_points() -> torch.Tensor:
     """3 fingertip + origin control points as a homogeneous [4, 4] tensor."""
     gripper_config = load_default_gripper_config(Path(__file__).stem)
-    control_points = np.array(load_control_points_core(gripper_config), dtype=np.float32)  # [3, 3]
-    control_points = np.vstack([control_points, np.zeros(3)])       # [4, 3]
-    control_points = np.hstack([control_points, np.ones((4, 1))])   # [4, 4]
-    return torch.from_numpy(control_points).float().T               # [4, 4]
+    control_points = np.array(
+        load_control_points_core(gripper_config), dtype=np.float32
+    )  # [3, 3]
+    control_points = np.vstack([control_points, np.zeros(3)])  # [4, 3]
+    control_points = np.hstack([control_points, np.ones((4, 1))])  # [4, 4]
+    return torch.from_numpy(control_points).float().T  # [4, 4]
 
 
 def load_control_points_for_visualization():
@@ -64,7 +66,7 @@ def load_control_points_for_visualization():
     cps = np.array(load_control_points_core(gripper_config), dtype=np.float32)  # [3, 3]
     origin = [0.0, 0.0, 0.0]
     return [
-        [origin, cps[0].tolist()],   # A
-        [origin, cps[1].tolist()],   # B
-        [origin, cps[2].tolist()],   # C
+        [origin, cps[0].tolist()],  # A
+        [origin, cps[1].tolist()],  # B
+        [origin, cps[2].tolist()],  # C
     ]

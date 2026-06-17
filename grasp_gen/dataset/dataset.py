@@ -1343,9 +1343,7 @@ class TriFingerGraspDataset(ObjectPickDataset):
         # Loaded from a per-object NPZ produced by contacts_to_heatmap(); falls back
         # to zeros until simulation contact data is available.
         if "contact_heatmap" not in outputs:
-            heatmap = self._load_contact_heatmap(
-                outputs.get("scene", ""), num_points
-            )
+            heatmap = self._load_contact_heatmap(outputs.get("scene", ""), num_points)
             outputs["contact_heatmap"] = heatmap
 
         return outputs
