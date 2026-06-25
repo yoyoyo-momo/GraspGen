@@ -319,7 +319,7 @@ class GraspGenGenerator(nn.Module):
         if eval:
             return self.forward_inference(data, return_metrics=True)
         else:
-            return self.forward_train(data)
+            return self.forward_train(data, cfg=cfg)
 
     def infer(self, data, return_metrics=False):
         """Inference method for generating grasps.
@@ -333,7 +333,7 @@ class GraspGenGenerator(nn.Module):
         """
         return self.forward_inference(data, return_metrics=return_metrics)
 
-    def forward_train(self, data):
+    def forward_train(self, data, cfg=None):
         """Training forward pass implementing the diffusion process.
 
         Args:
@@ -522,14 +522,27 @@ class GraspGenGenerator(nn.Module):
         if per_obj_embedding is not None:
             heatmap_pred = self.contact_heatmap_head(depth_xyz, per_obj_embedding)
             outputs["contact_heatmap_pred"] = heatmap_pred.sigmoid()
-            if "contact_heatmap" in data:
+            use_heatmap = getattr(cfg, "use_contact_heatmap", False)
+            if use_heatmap and "contact_heatmap" in data:
                 heatmap_gt = data["contact_heatmap"]
                 if isinstance(heatmap_gt, list):
                     heatmap_gt = torch.stack(heatmap_gt)
                 heatmap_gt = heatmap_gt.to(device).float()
-                if heatmap_gt.sum() > 0:
+                lambda_h = getattr(cfg, "lambda_contact_heatmap", 1.0)
+                if "has_contact_heatmap" in data:
+                    # Per-sample mask: only supervise samples with real contact data
+                    mask = data["has_contact_heatmap"].to(device)
+                    if mask.any():
+                        losses["contact_heatmap"] = (
+                            lambda_h,
+                            focal_loss_with_logits(
+                                heatmap_pred[mask], heatmap_gt[mask]
+                            ),
+                        )
+                elif heatmap_gt.sum() > 0:
+                    # Backward compat: no has_contact_heatmap field — use old sum>0 guard
                     losses["contact_heatmap"] = (
-                        1.0,
+                        lambda_h,
                         focal_loss_with_logits(heatmap_pred, heatmap_gt),
                     )
 

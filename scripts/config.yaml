@@ -188,6 +188,8 @@ train:
     num_scenes: null
     debug: False
     debug_ddp: False
+    use_contact_heatmap: false   # set true to enable contact heatmap auxiliary loss
+    lambda_contact_heatmap: 0.1  # weight applied to the heatmap focal loss
 
 eval:
     model_name: 'm2t2' # Choose from [m2t2, diffusion, discriminator]

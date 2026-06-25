@@ -1343,22 +1343,29 @@ class TriFingerGraspDataset(ObjectPickDataset):
         # Loaded from a per-object NPZ produced by contacts_to_heatmap(); falls back
         # to zeros until simulation contact data is available.
         if "contact_heatmap" not in outputs:
-            heatmap = self._load_contact_heatmap(outputs.get("scene", ""), num_points)
+            heatmap, has_heatmap = self._load_contact_heatmap(
+                outputs.get("scene", ""), num_points
+            )
             outputs["contact_heatmap"] = heatmap
+            outputs["has_contact_heatmap"] = torch.tensor(has_heatmap, dtype=torch.bool)
 
         return outputs
 
-    def _load_contact_heatmap(self, scene_key: str, num_points: int) -> torch.Tensor:
-        """Load [num_points, num_fingers] heatmap from NPZ, or return zeros."""
+    def _load_contact_heatmap(self, scene_key: str, num_points: int) -> tuple:
+        """Load [num_points, num_fingers] heatmap from NPZ, or return zeros.
+
+        Returns:
+            (heatmap tensor, has_real_data bool)
+        """
         if not scene_key or not self.grasp_root_dir:
-            return torch.zeros(num_points, self.num_fingers)
+            return torch.zeros(num_points, self.num_fingers), False
 
         object_name = os.path.splitext(os.path.basename(scene_key))[0]
         npz_path = os.path.join(
             self.grasp_root_dir, "contact_heatmaps", f"{object_name}.npz"
         )
         if not os.path.exists(npz_path):
-            return torch.zeros(num_points, self.num_fingers)
+            return torch.zeros(num_points, self.num_fingers), False
 
         try:
             data = np.load(npz_path)
@@ -1369,9 +1376,9 @@ class TriFingerGraspDataset(ObjectPickDataset):
                 n = min(heatmap.shape[0], num_points)
                 result[:n] = heatmap[:n]
                 heatmap = result
-            return torch.from_numpy(heatmap)
+            return torch.from_numpy(heatmap), True
         except Exception:
-            return torch.zeros(num_points, self.num_fingers)
+            return torch.zeros(num_points, self.num_fingers), False
 
 
 def generate_negative_hardnegatives(
