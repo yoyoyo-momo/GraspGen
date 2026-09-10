@@ -33,7 +33,8 @@ from grasp_gen.models.model_utils import (
     load_pretrained_checkpoint_to_dict,
     offset2batch,
 )
-from grasp_gen.models.ptv3.ptv3 import PointTransformerV3
+# NOTE: PointTransformerV3 is imported lazily where used to avoid forcing the
+# spconv dependency when the pointnet backbone (the default) is used instead.
 from grasp_gen.robot import get_gripper_info
 from grasp_gen.utils.logging_config import get_logger
 
@@ -85,6 +86,7 @@ class GraspGenGenerator(nn.Module):
         loss_pointmatching: bool = True,
         loss_l1_pos: bool = False,
         loss_l1_rot: bool = False,
+        loss_l1_joints: bool = False,
         grasp_repr: str = "r3_6d",
         kappa: float = -1.0,
         clip_sample: bool = True,
@@ -97,6 +99,7 @@ class GraspGenGenerator(nn.Module):
         checkpoint_object_encoder_pretrained: str = None,
         num_joints: int = 8,
         num_fingers: int = 3,
+        condition_on_pose: bool = False,
     ):
         super().__init__()
 
@@ -111,6 +114,7 @@ class GraspGenGenerator(nn.Module):
         self.loss_pointmatching = loss_pointmatching
         self.loss_l1_pos = loss_l1_pos
         self.loss_l1_rot = loss_l1_rot
+        self.loss_l1_joints = loss_l1_joints
         self.grasp_repr = grasp_repr
         self.kappa = None if kappa <= 0 else kappa
         self.clip_sample = clip_sample
@@ -123,6 +127,7 @@ class GraspGenGenerator(nn.Module):
         self.checkpoint_object_encoder_pretrained = checkpoint_object_encoder_pretrained
         self.num_joints = num_joints
         self.num_fingers = num_fingers
+        self.condition_on_pose = condition_on_pose
 
         if self.grasp_repr == "r3_6d":
             self.pose_dim = 9
@@ -132,8 +137,13 @@ class GraspGenGenerator(nn.Module):
             raise NotImplementedError(
                 f"Rotation representation {grasp_repr} is not implemented!"
             )
-        # Full TriFinger grasp state: [xyz(3) + rot6d/so3/euler + q_pre(num_joints) + q_final(num_joints)]
-        self.output_dim = self.pose_dim + 2 * self.num_joints
+        if self.condition_on_pose:
+            # Pose is supplied as a conditioning input (see pose_encoder below),
+            # not diffused — the model only ever has to predict joint angles.
+            self.output_dim = 2 * self.num_joints
+        else:
+            # Full TriFinger grasp state: [xyz(3) + rot6d/so3/euler + q_pre(num_joints) + q_final(num_joints)]
+            self.output_dim = self.pose_dim + 2 * self.num_joints
 
         if obs_backbone == "vit":
             from grasp_gen.models.vit import VisionTransformer
@@ -152,6 +162,8 @@ class GraspGenGenerator(nn.Module):
                 feature_dim=1 if self.pose_repr == "pc_feature" else -1,
             )
         elif obs_backbone == "ptv3":
+            from grasp_gen.models.ptv3.ptv3 import PointTransformerV3
+
             self.object_encoder = PointTransformerV3(
                 in_channels=3,
                 enable_flash=False,
@@ -170,12 +182,31 @@ class GraspGenGenerator(nn.Module):
             pose_repr=self.pose_repr,
         )
 
+        if self.condition_on_pose:
+            # Projects the (fixed, known) pose's r3_6d encoding into the same
+            # width as the object embedding so it can be added as conditioning
+            # — cheaper than widening the diffusion head's expected input.
+            self.pose_encoder = nn.Sequential(
+                nn.Linear(self.pose_dim, self.num_obs_dim),
+                nn.ReLU(),
+                nn.Linear(self.num_obs_dim, self.num_obs_dim),
+            )
+
         self.contact_heatmap_head = ContactHeatmapHead(
             obs_dim=self.num_obs_dim,
             num_fingers=self.num_fingers,
         )
 
-        if self.compositional_schedular:
+        if self.condition_on_pose:
+            # No pose sub-vector left to split a compositional pos/rot
+            # schedule over — always use a single joints-only scheduler.
+            self.noise_scheduler = DDPMScheduler(
+                num_train_timesteps=self.num_diffusion_iters,
+                beta_schedule=self.beta_schedule,
+                clip_sample=self.clip_sample,
+                prediction_type="epsilon",
+            )
+        elif self.compositional_schedular:
             self.noise_scheduler_pos = DDPMScheduler(
                 num_train_timesteps=self.num_diffusion_iters,
                 beta_schedule="scaled_linear",
@@ -290,6 +321,7 @@ class GraspGenGenerator(nn.Module):
             "loss_pointmatching": cfg.loss_pointmatching,
             "loss_l1_pos": cfg.loss_l1_pos,
             "loss_l1_rot": cfg.loss_l1_rot,
+            "loss_l1_joints": getattr(cfg, "loss_l1_joints", False),
             "grasp_repr": cfg.grasp_repr,
             "kappa": cfg.kappa,
             "clip_sample": cfg.clip_sample,
@@ -302,6 +334,7 @@ class GraspGenGenerator(nn.Module):
             "checkpoint_object_encoder_pretrained": cfg.checkpoint_object_encoder_pretrained,
             "num_joints": getattr(cfg, "num_joints", 8),
             "num_fingers": getattr(cfg, "num_fingers", 3),
+            "condition_on_pose": getattr(cfg, "condition_on_pose", False),
         }
         return cls(**args)
 
@@ -345,17 +378,19 @@ class GraspGenGenerator(nn.Module):
         device = data["points"].device
         num_objects_in_batch = len(data["points"])
 
-        num_grasps_per_batch = data["grasps"][0].shape[0]
-        batch_size = num_objects_in_batch * num_grasps_per_batch
         depth = data["points"]
         grasps = data["grasps"]
 
         num_points = depth.shape[-2]
         depth = depth.reshape([-1, num_points, 3])
 
-        grasps_init_size = [num_objects_in_batch, num_grasps_per_batch, 4, 4]
         if isinstance(grasps, list):
-            grasps = torch.cat(grasps)
+            grasps = torch.stack(grasps)  # [B, N, 4, 4] — cat gave [B*N, 4, 4] and shape[1]=4 (wrong)
+
+        # grasps is now [num_objects_in_batch, num_grasps_per_object, 4, 4]
+        num_grasps_per_batch = grasps.shape[1]
+        batch_size = num_objects_in_batch * num_grasps_per_batch
+        grasps_init_size = [num_objects_in_batch, num_grasps_per_batch, 4, 4]
 
         grasps = grasps.reshape([-1, 4, 4])
 
@@ -372,8 +407,14 @@ class GraspGenGenerator(nn.Module):
         pose_9d = matrix_to_rt(grasps, self.grasp_repr, kappa=self.kappa)
 
         if "q_pre" in data:
-            q_pre = data["q_pre"].reshape([-1, self.num_joints]).to(device)
-            q_final = data["q_final"].reshape([-1, self.num_joints]).to(device)
+            q_pre = data["q_pre"]
+            q_final = data["q_final"]
+            if isinstance(q_pre, list):
+                q_pre = torch.cat(q_pre)
+            if isinstance(q_final, list):
+                q_final = torch.cat(q_final)
+            q_pre = q_pre.reshape([-1, self.num_joints]).to(device)
+            q_final = q_final.reshape([-1, self.num_joints]).to(device)
         else:
             q_pre = torch.zeros([batch_size, self.num_joints], device=device)
             q_final = torch.zeros([batch_size, self.num_joints], device=device)
@@ -383,7 +424,11 @@ class GraspGenGenerator(nn.Module):
         q_pre = self._normalize_joints(q_pre)
         q_final = self._normalize_joints(q_final)
 
-        grasps_gt = components_to_grasp_state(pose_9d, q_pre, q_final)
+        if self.condition_on_pose:
+            # Pose is conditioning, not a diffusion target — only joints are diffused.
+            grasps_gt = torch.cat([q_pre, q_final], dim=-1)
+        else:
+            grasps_gt = components_to_grasp_state(pose_9d, q_pre, q_final)
 
         noise = torch.randn([batch_size, self.output_dim], device=device).float()
 
@@ -438,7 +483,15 @@ class GraspGenGenerator(nn.Module):
             per_obj_embedding = None
             raise NotImplementedError(f"Pose repr {self.pose_repr} not implemented!")
 
-        if self.compositional_schedular:
+        if self.condition_on_pose:
+            # Fuse the (fixed, known) target pose into the conditioning —
+            # additive fusion keeps the diffusion head's expected input width
+            # unchanged.
+            object_embedding = object_embedding + self.pose_encoder(pose_9d)
+
+        if self.condition_on_pose:
+            noisy_grasps = self.noise_scheduler.add_noise(grasps_gt, noise, timesteps)
+        elif self.compositional_schedular:
             noisy_grasps_pos = self.noise_scheduler_pos.add_noise(
                 grasps_gt[..., :3], noise[..., :3], timesteps
             )
@@ -455,52 +508,69 @@ class GraspGenGenerator(nn.Module):
         samples = noisy_grasps if self.pose_repr == "mlp" else None
         noise_pred = self.diffusion_head(object_embedding, timesteps, samples)
 
-        pred_noise_pts_mat = rt_to_matrix(
-            noise_pred[:, : self.pose_dim], self.grasp_repr, self.kappa
-        )
-        actual_noise_pts_mat = rt_to_matrix(
-            noise[:, : self.pose_dim], self.grasp_repr, self.kappa
-        )
-        noisy_grasps_mat = rt_to_matrix(
-            noisy_grasps[:, : self.pose_dim], self.grasp_repr, self.kappa
-        )
-        grasps_gt_mat = rt_to_matrix(
-            grasps_gt[:, : self.pose_dim], self.grasp_repr, self.kappa
-        )
-
-        stats = compute_metrics_given_two_sets_of_poses(
-            actual_noise_pts_mat, pred_noise_pts_mat, self.gripper_info
-        )
-
-        losses = {}
-        if self.loss_pointmatching:
-            point_matching_loss = compute_grasp_loss(
-                actual_noise_pts_mat, pred_noise_pts_mat, self.ctr_pts
+        if self.condition_on_pose:
+            # No pose sub-vector in noise_pred/noisy_grasps/grasps_gt at all —
+            # the entire output is joint-angle noise. Pose-accuracy stats and
+            # the pose point-matching loss are moot (pose is a fixed input,
+            # not a prediction), so skip them; joint L1 is the sole signal.
+            stats = {}
+            losses = {}
+            joint_loss = torch.linalg.norm(noise - noise_pred, dim=-1)
+            losses["joint_loss"] = (1.0, torch.mean(joint_loss))
+        else:
+            pred_noise_pts_mat = rt_to_matrix(
+                noise_pred[:, : self.pose_dim], self.grasp_repr, self.kappa
             )
-            losses["noise_pred"] = (2.0, point_matching_loss)
-
-        if self.loss_l1_pos:
-            position_loss = torch.linalg.norm(
-                noise[..., :3] - noise_pred[..., :3], dim=-1
+            actual_noise_pts_mat = rt_to_matrix(
+                noise[:, : self.pose_dim], self.grasp_repr, self.kappa
             )
-            position_loss = torch.mean(position_loss)  # across the batch
-            losses["position_loss"] = (1.0, position_loss)
-
-        if self.loss_l1_rot:
-            rotation_loss = torch.linalg.norm(
-                noise[..., 3 : self.pose_dim] - noise_pred[..., 3 : self.pose_dim],
-                dim=-1,
+            noisy_grasps_mat = rt_to_matrix(
+                noisy_grasps[:, : self.pose_dim], self.grasp_repr, self.kappa
             )
-            rotation_loss = torch.mean(rotation_loss)
-            losses["rotation_loss"] = (1.0, rotation_loss)
-
-            # Joint losses (q_pre and q_final in the diffusion noise space)
-            joint_loss = torch.linalg.norm(
-                noise[..., self.pose_dim :] - noise_pred[..., self.pose_dim :],
-                dim=-1,
+            grasps_gt_mat = rt_to_matrix(
+                grasps_gt[:, : self.pose_dim], self.grasp_repr, self.kappa
             )
-            joint_loss = torch.mean(joint_loss)
-            losses["joint_loss"] = (1.0, joint_loss)
+
+            stats = compute_metrics_given_two_sets_of_poses(
+                actual_noise_pts_mat, pred_noise_pts_mat, self.gripper_info
+            )
+
+            losses = {}
+            if self.loss_pointmatching:
+                point_matching_loss = compute_grasp_loss(
+                    actual_noise_pts_mat, pred_noise_pts_mat, self.ctr_pts
+                )
+                losses["noise_pred"] = (2.0, point_matching_loss)
+
+            if self.loss_l1_pos:
+                position_loss = torch.linalg.norm(
+                    noise[..., :3] - noise_pred[..., :3], dim=-1
+                )
+                position_loss = torch.mean(position_loss)  # across the batch
+                losses["position_loss"] = (1.0, position_loss)
+
+            if self.loss_l1_rot:
+                rotation_loss = torch.linalg.norm(
+                    noise[..., 3 : self.pose_dim] - noise_pred[..., 3 : self.pose_dim],
+                    dim=-1,
+                )
+                rotation_loss = torch.mean(rotation_loss)
+                losses["rotation_loss"] = (1.0, rotation_loss)
+
+                # Joint losses (q_pre and q_final in the diffusion noise space)
+                joint_loss = torch.linalg.norm(
+                    noise[..., self.pose_dim :] - noise_pred[..., self.pose_dim :],
+                    dim=-1,
+                )
+                joint_loss = torch.mean(joint_loss)
+                losses["joint_loss"] = (1.0, joint_loss)
+
+            if self.loss_l1_joints and self.pose_dim < self.output_dim:
+                joint_loss = torch.linalg.norm(
+                    noise[..., self.pose_dim :] - noise_pred[..., self.pose_dim :],
+                    dim=-1,
+                )
+                losses["joint_loss"] = (1.0, torch.mean(joint_loss))
 
         grasp_state_init_size = [
             num_objects_in_batch,
@@ -508,11 +578,12 @@ class GraspGenGenerator(nn.Module):
             self.output_dim,
         ]
         outputs = {}
-        outputs["actual_noise_pts_mat"] = actual_noise_pts_mat.reshape(grasps_init_size)
-        outputs["pred_noise_pts_mat"] = pred_noise_pts_mat.reshape(grasps_init_size)
+        if not self.condition_on_pose:
+            outputs["actual_noise_pts_mat"] = actual_noise_pts_mat.reshape(grasps_init_size)
+            outputs["pred_noise_pts_mat"] = pred_noise_pts_mat.reshape(grasps_init_size)
 
-        outputs["noisy_grasps_mat"] = noisy_grasps_mat.reshape(grasps_init_size)
-        outputs["grasps_gt_mat"] = grasps_gt_mat.reshape(grasps_init_size)
+            outputs["noisy_grasps_mat"] = noisy_grasps_mat.reshape(grasps_init_size)
+            outputs["grasps_gt_mat"] = grasps_gt_mat.reshape(grasps_init_size)
 
         # Full 25D state outputs
         outputs["grasp_state_gt"] = grasps_gt.reshape(grasp_state_init_size)
@@ -569,6 +640,20 @@ class GraspGenGenerator(nn.Module):
         else:
             num_grasps_per_batch = self.num_grasps_per_object
             return_metrics = False
+
+        if self.condition_on_pose:
+            # Pose is supplied, not generated — data["grasps"] carries the
+            # TARGET poses to condition on (reused directly as T_palm below),
+            # not a diffusion target to denoise toward.
+            assert "grasps" in data, (
+                "condition_on_pose=True requires data['grasps'] "
+                "(the target poses to hold fixed during generation)."
+            )
+            target_grasps = data["grasps"]
+            if isinstance(target_grasps, list):
+                target_grasps = torch.stack(target_grasps)
+            target_grasps = target_grasps.reshape([-1, 4, 4]).to(device).float()
+            target_pose_9d = matrix_to_rt(target_grasps, self.grasp_repr, kappa=self.kappa)
 
         batch_size = data["points"].shape[0] * num_grasps_per_batch
         depth = data["points"]
@@ -630,7 +715,13 @@ class GraspGenGenerator(nn.Module):
                     mask_batch
                 ]  # Redistribute object embeddings to full batch, result is [batch_size, self.num_obs_dim]
 
-            if self.compositional_schedular:
+            if self.condition_on_pose:
+                object_embedding = object_embedding + self.pose_encoder(target_pose_9d)
+
+            if self.condition_on_pose:
+                self.noise_scheduler.set_timesteps(self.num_diffusion_iters_eval)
+                timesteps = self.noise_scheduler.timesteps
+            elif self.compositional_schedular:
                 self.noise_scheduler_pos.set_timesteps(self.num_diffusion_iters_eval)
                 timesteps = self.noise_scheduler_pos.timesteps
                 self.noise_scheduler_rot.set_timesteps(self.num_diffusion_iters_eval)
@@ -678,7 +769,7 @@ class GraspGenGenerator(nn.Module):
                 # Forward: Predict noise
                 noise_pred = self.diffusion_head(object_embedding, k, samples)
 
-                if self.compositional_schedular:
+                if not self.condition_on_pose and self.compositional_schedular:
                     # pos scheduler: xyz dims; rot scheduler: rotation + joint dims
                     res_pos = self.noise_scheduler_pos.step(
                         model_output=noise_pred[..., :3],
@@ -739,25 +830,33 @@ class GraspGenGenerator(nn.Module):
 
                     noisy_grasps = res.prev_sample
 
-                pred_grasps = rt_to_matrix(
-                    noisy_grasps[:, : self.pose_dim], self.grasp_repr, self.kappa
-                )
-
-                grasps_pred = pred_grasps.reshape(grasps_init_size)
+                if self.condition_on_pose:
+                    grasps_pred = target_grasps.reshape(grasps_init_size)
+                else:
+                    pred_grasps = rt_to_matrix(
+                        noisy_grasps[:, : self.pose_dim], self.grasp_repr, self.kappa
+                    )
+                    grasps_pred = pred_grasps.reshape(grasps_init_size)
 
                 grasps_per_iteration[:, iter_idx, :, ::] = grasps_pred
 
         # Final pose matrix
-        T_palm = rt_to_matrix(
-            noisy_grasps[:, : self.pose_dim], self.grasp_repr, self.kappa
-        )
-        T_palm = T_palm.reshape(grasps_init_size)
-        T_palm[:, :, 3, 3] = 1  # proper homogeneous matrix
+        if self.condition_on_pose:
+            # Pose was held fixed throughout — it IS the supplied target, not
+            # something recovered from noisy_grasps (which holds joints only).
+            T_palm = target_grasps.reshape(grasps_init_size)
+        else:
+            T_palm = rt_to_matrix(
+                noisy_grasps[:, : self.pose_dim], self.grasp_repr, self.kappa
+            )
+            T_palm = T_palm.reshape(grasps_init_size)
+            T_palm[:, :, 3, 3] = 1  # proper homogeneous matrix
 
         # Split joint dims from the final denoised state and convert back to radians.
         # noisy_grasps contains normalized joints ([-1, 1]); denormalize to physical units.
-        q_pre_out = noisy_grasps[:, self.pose_dim : self.pose_dim + self.num_joints]
-        q_final_out = noisy_grasps[:, self.pose_dim + self.num_joints : self.output_dim]
+        joint_pose_dim = 0 if self.condition_on_pose else self.pose_dim
+        q_pre_out = noisy_grasps[:, joint_pose_dim : joint_pose_dim + self.num_joints]
+        q_final_out = noisy_grasps[:, joint_pose_dim + self.num_joints : self.output_dim]
         q_pre_out = self._denormalize_joints(q_pre_out)
         q_final_out = self._denormalize_joints(q_final_out)
         q_pre_out = q_pre_out.reshape(

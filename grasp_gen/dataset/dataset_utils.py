@@ -196,6 +196,8 @@ class ObjectGraspDataset:
     negative_grasps: np.ndarray = None
     positive_grasps_onpolicy: np.ndarray = None
     negative_grasps_onpolicy: np.ndarray = None
+    q_pre: np.ndarray = None    # [num_positive_grasps, num_joints] pregrasp joint angles (radians)
+    q_final: np.ndarray = None  # [num_positive_grasps, num_joints] close joint angles (radians)
 
     def export_to_dict(self) -> Dict:
         return {
@@ -207,6 +209,8 @@ class ObjectGraspDataset:
             "negative_grasps": self.negative_grasps,
             "positive_grasps_onpolicy": self.positive_grasps_onpolicy,
             "negative_grasps_onpolicy": self.negative_grasps_onpolicy,
+            "q_pre": self.q_pre,
+            "q_final": self.q_final,
         }
 
     @classmethod
@@ -224,6 +228,8 @@ class ObjectGraspDataset:
             negative_grasps_onpolicy=load_h5_handle_empty_case(
                 data["negative_grasps_onpolicy"]
             ),
+            q_pre=load_h5_handle_empty_case(data["q_pre"]) if "q_pre" in data else None,
+            q_final=load_h5_handle_empty_case(data["q_final"]) if "q_final" in data else None,
         )
 
 
@@ -316,6 +322,9 @@ class GraspGenDatasetCache(dict):
                 rendering_data_dict["positive_grasps"] = rendering_data_h5[
                     "positive_grasps"
                 ][...]
+                if "q_pre_unsampled" in rendering_data_h5:
+                    rendering_data_dict["q_pre_unsampled"] = rendering_data_h5["q_pre_unsampled"][...]
+                    rendering_data_dict["q_final_unsampled"] = rendering_data_h5["q_final_unsampled"][...]
                 renderings.append(rendering_data_dict)
 
             cache[key] = (object_grasp_data, renderings)
@@ -890,6 +899,14 @@ def load_object_grasp_datapoint_objaverse(
     not_success = np.logical_not(grasp_mask)
     negative_grasps = grasp_poses[not_success]
 
+    q_pre_data = None
+    q_final_data = None
+    if "q_pre" in grasps and "q_final" in grasps:
+        q_pre_all = np.array(grasps["q_pre"], dtype=np.float32)
+        q_final_all = np.array(grasps["q_final"], dtype=np.float32)
+        q_pre_data = q_pre_all[grasp_mask]
+        q_final_data = q_final_all[grasp_mask]
+
     if not load_discriminator_dataset:
         # Only do this for the generator
         if positive_grasps.shape[0] < min_pos_grasps_gen:
@@ -942,6 +959,8 @@ def load_object_grasp_datapoint_objaverse(
         negative_grasps=negative_grasps,
         positive_grasps_onpolicy=positive_grasps_onpolicy,
         negative_grasps_onpolicy=negative_grasps_onpolicy,
+        q_pre=q_pre_data,
+        q_final=q_final_data,
     )
 
 

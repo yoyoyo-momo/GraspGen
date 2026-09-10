@@ -60,6 +60,7 @@ class GripperInfo:
     control_points: np.ndarray = None
     control_points_visualization: np.ndarray = None
     transform_from_base_link_to_tool_tcp: np.ndarray = None
+    grasp_visibility_radius: float = 0.03
 
 
 def get_canonical_gripper_control_points(w, d):
@@ -391,6 +392,10 @@ def get_gripper_info(name: str) -> GripperInfo:
             [0, 0, np.abs(depth)]
         )
 
+    grasp_visibility_radius = float(
+        gripper_config.get("grasp_visibility_radius", 0.03)
+    )
+
     collision_mesh.apply_transform(offset_transform)
     visual_mesh.apply_transform(offset_transform)
 
@@ -406,5 +411,6 @@ def get_gripper_info(name: str) -> GripperInfo:
         control_points_visualization=control_points_visualization,
         symmetric=symmetric_antipodal,
         transform_from_base_link_to_tool_tcp=transform_from_base_link_to_tool_tcp,
+        grasp_visibility_radius=grasp_visibility_radius,
     )
     return gripper_info

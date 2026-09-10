@@ -61,3 +61,7 @@ num_joints: 8
 
 transform_offset_from_asset_to_graspgen_convention: [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0, 1.0]]
 symmetric_antipodal: False
+
+# Trifinger has 3 widely-spaced fingertips; the single-TCP visibility filter needs a
+# larger radius than the Franka default (0.03m) to avoid rejecting valid grasps.
+grasp_visibility_radius: 0.10

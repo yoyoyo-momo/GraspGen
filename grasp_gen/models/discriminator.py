@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from grasp_gen.dataset.dataset import MAPPING_ID2NAME
+from grasp_gen.dataset.visualize_utils import MAPPING_ID2NAME
 from grasp_gen.utils.math_utils import matrix_to_rt
 from grasp_gen.models.model_utils import (
     PointNetPlusPlus,
@@ -25,7 +25,8 @@ from grasp_gen.models.model_utils import (
     load_pretrained_checkpoint_to_dict,
     offset2batch,
 )
-from grasp_gen.models.ptv3.ptv3 import PointTransformerV3
+# NOTE: PointTransformerV3 is imported lazily where used to avoid forcing the
+# spconv dependency when the pointnet backbone (the default) is used instead.
 from grasp_gen.robot import get_gripper_info
 from grasp_gen.utils.logging_config import get_logger
 from grasp_gen.models.model_utils import load_pretrained_checkpoint_to_dict
@@ -91,6 +92,8 @@ class GraspGenDiscriminator(nn.Module):
                 feature_dim=1 if self.pose_repr == "pc_feature" else -1,
             )
         elif self.obs_backbone == "ptv3":
+            from grasp_gen.models.ptv3.ptv3 import PointTransformerV3
+
             self.object_encoder = PointTransformerV3(
                 in_channels=3,
                 enable_flash=False,

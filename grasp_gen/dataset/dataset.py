@@ -692,6 +692,7 @@ class PickDataset(Dataset):
                         grasps,
                         outputs["points"],
                         transform_from_base_link_to_tool_tcp=self.gripper_info.transform_from_base_link_to_tool_tcp,
+                        radius=self.gripper_info.grasp_visibility_radius,
                     )
                     if mask_grasp_visibility is not None:
                         positive_grasps = object_grasp_data.positive_grasps.copy()[
@@ -700,6 +701,9 @@ class PickDataset(Dataset):
                         outputs["mesh_mode"] = mesh_mode
                         outputs["load_contact_batch"] = load_contact_batch
                         outputs["positive_grasps"] = positive_grasps
+                        if object_grasp_data.q_pre is not None:
+                            outputs["q_pre_unsampled"] = object_grasp_data.q_pre[mask_grasp_visibility]
+                            outputs["q_final_unsampled"] = object_grasp_data.q_final[mask_grasp_visibility]
                         rendering_output.append(outputs)
                     else:
                         error_code = (
@@ -908,6 +912,7 @@ class ObjectPickDataset(PickDataset):
                 grasps,
                 outputs["points"],
                 transform_from_base_link_to_tool_tcp=self.gripper_info.transform_from_base_link_to_tool_tcp,
+                radius=self.gripper_info.grasp_visibility_radius,
             )
 
             if mask_grasp_visibility is not None:
@@ -915,6 +920,9 @@ class ObjectPickDataset(PickDataset):
                     mask_grasp_visibility
                 ]
                 outputs["positive_grasps"] = positive_grasps
+                if object_grasp_data.q_pre is not None:
+                    outputs["q_pre_unsampled"] = object_grasp_data.q_pre[mask_grasp_visibility]
+                    outputs["q_final_unsampled"] = object_grasp_data.q_final[mask_grasp_visibility]
             else:
                 if error_code == DataLoaderError.RENDERING_SUCCESS:
                     error_code = (
@@ -1249,6 +1257,20 @@ class ObjectPickDataset(PickDataset):
                 outputs["grasps"] = grasps_gt[mask_grasps_filtered]
                 outputs["grasps_highres"] = grasps_gt
 
+                if "q_pre_unsampled" in outputs:
+                    q_pre_np = outputs.pop("q_pre_unsampled")
+                    q_final_np = outputs.pop("q_final_unsampled")
+                    outputs["q_pre"] = torch.from_numpy(q_pre_np[mask_grasps_filtered].astype(np.float32))
+                    outputs["q_final"] = torch.from_numpy(q_final_np[mask_grasps_filtered].astype(np.float32))
+            else:
+                outputs["grasps_highres"] = outputs["grasps"][0]
+
+                if "q_pre_unsampled" in outputs:
+                    q_pre_np = outputs.pop("q_pre_unsampled")
+                    q_final_np = outputs.pop("q_final_unsampled")
+                    outputs["q_pre"] = torch.from_numpy(q_pre_np.astype(np.float32))
+                    outputs["q_final"] = torch.from_numpy(q_final_np.astype(np.float32))
+
             if not load_contact_batch:
                 for key in ["points"]:
                     if isinstance(outputs[key], np.ndarray):
@@ -1282,6 +1304,8 @@ class ObjectPickDataset(PickDataset):
                     pc,
                     self.gripper_visual_mesh,
                 )
+        if isinstance(outputs["points"], np.ndarray):
+            outputs["points"] = torch.from_numpy(outputs["points"]).float()
         if len(outputs["points"].shape) == 2:
             outputs["points"] = outputs["points"].unsqueeze(0)
         return outputs
@@ -1319,11 +1343,13 @@ class TriFingerGraspDataset(ObjectPickDataset):
             return outputs
 
         num_points = outputs["points"].shape[-2]
-        num_grasps = (
-            outputs["grasps"].shape[0]
-            if isinstance(outputs["grasps"], torch.Tensor)
-            else outputs["grasps"][0].shape[0]
-        )
+        grasps = outputs["grasps"]
+        if isinstance(grasps, torch.Tensor):
+            # ObjectPickDataset returns grasps as [num_objects_in_batch, num_grasps, 4, 4]
+            # (mirroring how "points" is unsqueezed), or already-flat [num_grasps, 4, 4].
+            num_grasps = grasps.shape[1] if grasps.dim() == 4 else grasps.shape[0]
+        else:
+            num_grasps = grasps[0].shape[0]
 
         # Inject q_pre and q_final — zeros until simulation data is available.
         # Shape: [num_grasps, num_joints]. Training datasets should override this
